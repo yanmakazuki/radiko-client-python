@@ -153,7 +153,20 @@ def probe_tone(seconds: int) -> OutputSummary:
 def probe_silent(seconds: int, stop, on_progress=None) -> OutputSummary:
     if not 1 <= seconds <= 1800:
         raise OutputError("device", "無音の出力診断は1〜1800秒で指定してください")
-    return _play_generated(seconds, tone=False, stop=stop, on_progress=on_progress)
+    rate = 48000
+    channels = 2
+    frames = 0
+    underruns = 0
+    for index in range(seconds):
+        if stop.is_set():
+            break
+        summary = play_samples([0.0] * (rate * channels), rate, channels, stop)
+        frames += summary.frames
+        underruns += summary.underrun_frames
+        rate, channels = summary.sample_rate, summary.channels
+        if on_progress is not None and (index + 1) % 5 == 0:
+            on_progress(OutputSummary(frames, rate, channels, "f32", underruns))
+    return OutputSummary(frames, rate, channels, "f32", underruns)
 
 
 def play_samples(
@@ -218,7 +231,7 @@ def _consume(
     if host_backend() == "coreaudio":
         from radiko.coreaudio import play as play_coreaudio
 
-        return play_coreaudio(samples, rate, channels, info, stop)
+        return play_coreaudio(samples, rate, channels, info, stop, step_hook)
     opened = _open_default()
     if opened is None:
         raise OutputError("none")
@@ -228,6 +241,8 @@ def _consume(
             raise OutputError("device", inspect_default_output(rate).mismatch)
         sample_format, out_channels = chosen
         while cursor < frames:
+            if step_hook is not None:
+                step_hook(played)
             if stop.is_set():
                 break
             step = min(quantum, frames - cursor)

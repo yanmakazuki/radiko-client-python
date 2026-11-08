@@ -725,6 +725,7 @@ def play_station(
     on_notice=None,
     transport_sleep=None,
     transport_delays=None,
+    on_ready=None,
 ) -> PlayReport:
     with transport_overrides(transport_sleep, transport_delays):
         return _play_station(
@@ -741,6 +742,7 @@ def play_station(
             reconnect_sleep,
             reauth_now,
             on_notice,
+            on_ready,
         )
 
 
@@ -758,6 +760,7 @@ def _play_station(
     reconnect_sleep=None,
     reauth_now=None,
     on_notice=None,
+    on_ready=None,
 ) -> PlayReport:
     from radiko.output import play_samples
     from radiko.stream import ProbeError
@@ -765,11 +768,12 @@ def _play_station(
     program, headers, _area, _outside, urls = prepare(
         station, mode, cursor, now, session, membership, position, cancelled
     )
+    if on_ready is not None:
+        on_ready(program)
     if not urls:
         raise ProbeError("endpoint")
     playlist_url, media = _open_media(urls[0], headers, cancelled)
     from radiko.fragmented import FragmentedAacDecoder
-    from radiko.hls import HlsCursor
     from radiko.reauth import ReauthState
 
     reauth = ReauthState(session, cancelled, now=reauth_now)
@@ -792,19 +796,12 @@ def _play_station(
     fragment_decoder = None
     init_uri = None
     sequence = media.media_sequence
-    if mode == "live":
-        live_cursor = HlsCursor.start(media, True)
-        sequence = live_cursor.next_sequence
-        control.messages.extend(live_cursor.messages)
-        live_cursor.messages.clear()
     pending = None
     if position:
         pending = (program.start + timedelta(seconds=position), position)
         media_seconds = position
-    while True:
-        if cancelled() or control.stopped:
-            reason = "cancelled"
-            break
+
+    def drain(*_args) -> None:
         while True:
             line = (
                 commands()
@@ -812,14 +809,20 @@ def _play_station(
                 else (pending_commands.pop(0) if pending_commands else None)
             )
             if not line:
-                break
+                return
             before = len(control.messages)
             control.handle(line)
             if on_notice is not None:
                 for message in control.messages[before:]:
                     on_notice(message)
-            if control.stopped:
-                break
+            if control.stopped or control.selected is not None:
+                return
+
+    while True:
+        if cancelled() or control.stopped:
+            reason = "cancelled"
+            break
+        drain()
         if control.selected is not None:
             new_mode, new_station, new_cursor, new_offset = control.selected
             control.selected = None
@@ -837,6 +840,7 @@ def _play_station(
                 reconnect_sleep,
                 reauth_now,
                 on_notice,
+                None,
             )
         if control.stopped or cancelled():
             reason = "cancelled"
@@ -957,7 +961,9 @@ def _play_station(
             piece, frame_count = trimmed
             media_seconds = target_seconds
             pending = None
-        stop_piece = _StopView(lambda: cancelled() or control.stopped)
+        stop_piece = _StopView(
+            lambda: cancelled() or control.stopped or control.selected is not None
+        )
         if limit is not None:
             room = limit - media_seconds
             if room <= 0:
@@ -966,7 +972,9 @@ def _play_station(
             max_frames = int(room * rate)
             if frame_count > max_frames:
                 piece = piece[: max_frames * channels]
-                summary = play_samples(piece, rate, channels, stop_piece, volume=control.volume)
+                summary = play_samples(
+                    piece, rate, channels, stop_piece, volume=control.volume, step_hook=drain
+                )
                 played_frames += summary.frames
                 underrun_frames += summary.underrun_frames
                 rate, channels = summary.sample_rate, summary.channels
@@ -975,7 +983,9 @@ def _play_station(
                 reason = "limit"
                 break
         if piece:
-            summary = play_samples(piece, rate, channels, stop_piece, volume=control.volume)
+            summary = play_samples(
+                piece, rate, channels, stop_piece, volume=control.volume, step_hook=drain
+            )
             played_frames += summary.frames
             underrun_frames += summary.underrun_frames
             rate, channels = summary.sample_rate, summary.channels

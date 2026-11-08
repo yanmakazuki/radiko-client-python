@@ -184,6 +184,41 @@ def test_missing_alsa_device_message_and_optional_library_log(tmp_path):
     assert "既定の音声出力機器がありません" in verbose.stderr
 
 
+def test_play_samples_calls_the_step_hook_during_output(monkeypatch):
+    import threading
+
+    from radiko.output import play_samples
+
+    monkeypatch.setenv("RADIKO_NULL_SINK", "1")
+    seen = []
+    summary = play_samples(
+        [0.0] * (48000 * 2),
+        48000,
+        2,
+        threading.Event(),
+        step_hook=seen.append,
+    )
+    assert summary.frames == 48000
+    assert seen and seen[-1] > 0
+
+
+def test_play_samples_step_hook_can_stop_within_a_quantum(monkeypatch):
+    import threading
+
+    from radiko.output import play_samples
+
+    monkeypatch.setenv("RADIKO_NULL_SINK", "1")
+    stop = threading.Event()
+    summary = play_samples(
+        [0.0] * (48000 * 2),
+        48000,
+        2,
+        stop,
+        step_hook=lambda _played: stop.set(),
+    )
+    assert summary.frames == 0
+
+
 def test_output_format_priority_prefers_f32_mono_over_i16_stereo(monkeypatch):
     from radiko.output import _select_format
 
@@ -197,6 +232,25 @@ def test_output_format_priority_prefers_f32_mono_over_i16_stereo(monkeypatch):
     selected = _select_format((_Library(), object()), 48000)
     assert selected == ("f32", 1)
     assert calls == [(14, 2), (14, 1)]
+
+
+def test_probe_silent_streams_one_second_chunks_and_reports_every_five(monkeypatch):
+    import threading
+
+    from radiko.output import OutputSummary, probe_silent
+
+    calls = []
+    progress = []
+
+    def fake(samples, rate, channels, stop=None, paused=None, volume=100, step_hook=None):
+        calls.append(len(samples))
+        return OutputSummary(len(samples) // channels, rate, channels, "f32", 0)
+
+    monkeypatch.setattr("radiko.output.play_samples", fake)
+    summary = probe_silent(7, threading.Event(), progress.append)
+    assert calls == [48000 * 2] * 7
+    assert len(progress) == 1
+    assert summary.frames == 7 * 48000
 
 
 def test_null_sink_probe_counts_frames(monkeypatch, capsys):
