@@ -209,13 +209,31 @@ def inspect_chapters(args: list[str]) -> None:
     if offset != offset or abs(offset) == float("inf"):
         raise RuntimeError("補正秒数が不正です")
     path = Path(args[1])
-    data = path.read_bytes()[: 1024 * 1024 + 1]
+    try:
+        data = path.read_bytes()[: 1024 * 1024 + 1]
+    except OSError as error:
+        message = error.strerror or str(error)
+        raise RuntimeError(f"{message} (os error {error.errno})") from error
     chapter_set = parse_chapters(data, seconds, offset)
     if not chapter_set.chapters:
         stdout_ln("チャプター未提供")
     for chapter in chapter_set.chapters:
         stdout_ln(f"{chapter.start:.3f}–{chapter.end:.3f}秒  {chapter.title}")
     stdout_ln(f"不正項目: {chapter_set.invalid_count} / 除外した楽曲: {chapter_set.music_count}")
+
+
+def _sigint_stop(stop):
+    import signal
+
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, lambda *_args: stop.set())
+    return previous
+
+
+def _restore_sigint(previous) -> None:
+    import signal
+
+    signal.signal(signal.SIGINT, previous)
 
 
 def member_command(command: str, store: SessionStore) -> None:
@@ -317,10 +335,7 @@ def probe_output(args: list[str]) -> None:
     if len(values) > 1:
         raise RuntimeError("probe-output [--mute] [SECONDS]（--helpで範囲を確認）")
     if values:
-        try:
-            seconds = int(values[0])
-        except ValueError as error:
-            raise RuntimeError("probe-output [--mute] [SECONDS]（--helpで範囲を確認）") from error
+        seconds = _parse_u32(values[0])
     else:
         seconds = 30 if muted else 2
     import threading
@@ -329,7 +344,11 @@ def probe_output(args: list[str]) -> None:
     if muted:
         if not 1 <= seconds <= 1800:
             raise RuntimeError("無音の出力診断は1〜1800秒で指定してください")
-        summary = probe_silent(seconds, stop)
+        previous = _sigint_stop(stop)
+        try:
+            summary = probe_silent(seconds, stop)
+        finally:
+            _restore_sigint(previous)
         stdout_ln(
             f"無音出力{'中断' if stop.is_set() else '完了'}: {summary.frames}フレーム / {summary.sample_rate}Hz / "
             f"{summary.sample_format} / {summary.channels}ch / バッファ不足: {summary.underrun_frames}フレーム"
@@ -343,6 +362,19 @@ def probe_output(args: list[str]) -> None:
         f"生成音の出力完了: {summary.frames}フレーム / {summary.sample_rate}Hz / {summary.sample_format} / "
         f"{summary.channels}ch / バッファ不足: {summary.underrun_frames}フレーム"
     )
+
+
+def _parse_u32(text: str) -> int:
+    """Rust の parse::<u32>() と同じ失敗文にする。"""
+    if text == "":
+        raise RuntimeError("cannot parse integer from empty string")
+    body = text[1:] if text.startswith("+") else text
+    if not body or not body.isascii() or not body.isdigit():
+        raise RuntimeError("invalid digit found in string")
+    value = int(body)
+    if value > 0xFFFFFFFF:
+        raise RuntimeError("number too large to fit in target type")
+    return value
 
 
 def searches(args: list[str], data_dir: Path | None) -> None:
@@ -822,6 +854,7 @@ def play(args: list[str], data_dir: Path | None) -> None:
     commands = None
     notice = None
     stop = threading.Event()
+    previous = _sigint_stop(stop)
     if interactive and sys.stdin.isatty():
         import queue
 
@@ -851,27 +884,47 @@ def play(args: list[str], data_dir: Path | None) -> None:
                 return None
 
         notice = stderr_ln
-    membership = _membership(session, stop)
+    try:
+        membership = _membership(session, stop)
+    except RuntimeError:
+        if stop.is_set():
+            _restore_sigint(previous)
+            stdout_ln("中断しました")
+            return
+        raise
     if stop.is_set():
+        _restore_sigint(previous)
         stdout_ln("中断しました")
         return
     stderr_ln("放送枠・配信条件を確認して連続再生を準備しています…")
     from radiko.domain import JST
     from radiko.prepare import play_station
 
-    report = play_station(
-        station,
-        mode,
-        cursor,
-        now,
-        session,
-        membership,
-        offset,
-        None if seconds is None else float(seconds),
-        stop.is_set,
-        commands,
-        on_notice=notice,
-    )
+    try:
+        report = play_station(
+            station,
+            mode,
+            cursor,
+            now,
+            session,
+            membership,
+            offset,
+            None if seconds is None else float(seconds),
+            stop.is_set,
+            commands,
+            on_notice=notice,
+        )
+    except ProbeError as error:
+        _restore_sigint(previous)
+        if stop.is_set() or error.code == "cancelled":
+            stdout_ln("中断しました")
+            return
+        raise
+    except Exception:
+        _restore_sigint(previous)
+        raise
+    else:
+        _restore_sigint(previous)
     start = report.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     end = report.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     stdout_ln(

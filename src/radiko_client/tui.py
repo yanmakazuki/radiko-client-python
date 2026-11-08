@@ -1547,19 +1547,24 @@ def wait_jobs(screen: Screen, timeout: float = 8.0) -> None:
 
 
 def run(args: list[str], data_dir: Path | None) -> None:
-    if args == ["--help"] or "--help" in args:
+    offline, rest = split_args(args)
+    if rest == ["--help"]:
         from radiko_client.io import stdout_ln
 
         stdout_ln(USAGE)
         return
-    offline, rest = split_args(args)
+    if any(arg in {"--json", "--classifications"} for arg in rest):
+        raise RuntimeError("TUIでは表示用CLIオプションは使用できません")
+    now = datetime.now().astimezone()
+    if rest:
+        from radiko_client.cli import parse_program_request
+
+        parse_program_request(rest, now)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise RuntimeError("対話端末で実行してください")
+        raise RuntimeError("tuiは対話端末で実行してください")
     positional = [arg for arg in rest if not arg.startswith("-")]
     station = positional[0] if positional else "TBS"
-    screen = Screen(
-        [], datetime.now().astimezone(), offline=offline, data_dir=data_dir, station_id=station
-    )
+    screen = Screen([], now, offline=offline, data_dir=data_dir, station_id=station)
     if positional:
         from radiko.catalog import parse_day
 
@@ -1580,17 +1585,21 @@ def run(args: list[str], data_dir: Path | None) -> None:
 
 
 def _terminal_loop(screen: Screen) -> None:
+    import signal
     import termios
     import tty
 
     fd = sys.stdin.fileno()
     previous = termios.tcgetattr(fd)
+    before = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, lambda *_args: setattr(screen, "quit", True))
     try:
         tty.setraw(fd)
         sys.stdout.write("\x1b[?1049h\x1b[2J")
         sys.stdout.flush()
         service_loop(screen, _read_key, _paint)
     finally:
+        signal.signal(signal.SIGINT, before)
         sys.stdout.write("\x1b[?1049l")
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, previous)

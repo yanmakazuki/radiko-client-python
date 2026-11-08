@@ -94,11 +94,19 @@ def test_offline_help_and_errors_match_the_rust_process(tmp_path: Path):
         ["output-info", "-1"],
         ["output-info", "7999"],
         ["probe-output", "11"],
+        ["probe-output", "-1"],
+        ["probe-output", "abc"],
+        ["probe-output", "--mute", "-1"],
         ["play-live", "../TBS"],
         ["play-timefree", "TBS", "20990101000000"],
         ["chapters", "TBS", "20260230000000"],
         ["login"],
         ["inspect-chapters", str(FIXTURE), "90", "0"],
+        ["inspect-chapters", str(FIXTURE), " 90", "0"],
+        ["inspect-chapters", "/nonexistent-radiko.json", "90", "0"],
+        ["tui", "--bad"],
+        ["tui", "--json"],
+        ["tui", "TBS", "--help"],
     ]:
         _assert_same(argv)
     _assert_same(["--data-dir", "DATA", "session"], data)
