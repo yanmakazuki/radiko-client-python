@@ -1,7 +1,7 @@
 """macOS の CoreAudio。AudioToolbox の AudioQueue で f32 を出す。
 
-この環境は Linux なので、ここでは機器を開いていない。ライブラリが無いときは
-「既定の音声出力機器がありません」になる。呼び出し順は偽のライブラリで確認する。
+既定出力機器の名前・対応レート・f32 のチャンネルは AudioObject から読む。
+ライブラリやプロパティが読めないときは機器なしとして扱い、対応宣言をしない。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from radiko.output import OutputError, OutputInfo, OutputSummary
 
 LINEAR_PCM = 0x6C70636D
 FLOAT_PACKED = 1 | 8
+CF_STRING_ENCODING_UTF8 = 0x08000100
 
 
 class StreamDescription(ctypes.Structure):
@@ -44,8 +45,45 @@ class QueueBuffer(ctypes.Structure):
     ]
 
 
+class AudioObjectPropertyAddress(ctypes.Structure):
+    _fields_ = [
+        ("mSelector", ctypes.c_uint32),
+        ("mScope", ctypes.c_uint32),
+        ("mElement", ctypes.c_uint32),
+    ]
+
+
+class AudioValueRange(ctypes.Structure):
+    _fields_ = [
+        ("mMinimum", ctypes.c_double),
+        ("mMaximum", ctypes.c_double),
+    ]
+
+
+class AudioStreamRangedDescription(ctypes.Structure):
+    _fields_ = [
+        ("mFormat", StreamDescription),
+        ("mSampleRateRange", AudioValueRange),
+    ]
+
+
 _OUTPUT_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _callbacks: list = []
+
+
+def _fourcc(text: str) -> int:
+    return int.from_bytes(text.encode("ascii"), "big")
+
+
+SYSTEM_OBJECT = 1
+SCOPE_GLOBAL = _fourcc("glob")
+DEFAULT_OUTPUT_DEVICE = _fourcc("dOut")
+DEVICE_NAME = _fourcc("lnam")
+NOMINAL_SAMPLE_RATES = _fourcc("nsr#")
+DEVICE_STREAMS = _fourcc("stm#")
+STREAM_AVAILABLE_FORMATS = _fourcc("pft?")
+STREAM_PHYSICAL_FORMAT = _fourcc("pft ")
+AUDIO_QUEUE_IS_RUNNING = _fourcc("aqrn")
 
 
 def library():
@@ -61,15 +99,15 @@ def library():
 
 
 def inspect(rate: int, opened=None) -> OutputInfo:
-    own = opened is None
-    handle = opened or _open(rate, 2)
-    try:
-        if handle is None:
-            raise OutputError("none")
-        return OutputInfo("default", rate, "f32", 2, "")
-    finally:
-        if own and handle is not None:
-            _dispose(handle)
+    device = _default_output()
+    if device is None:
+        raise OutputError("none")
+    name, nominal, formats = device
+    channels = 2 if _supports(rate, 2, formats) else 1 if _supports(rate, 1, formats) else None
+    if channels is not None:
+        return OutputInfo(name, rate, "f32", channels, "")
+    mismatch = _mismatch(rate, nominal, formats)
+    return OutputInfo(name, rate, None, None, mismatch)
 
 
 def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop) -> OutputSummary:
@@ -80,6 +118,7 @@ def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop)
     done = threading.Event()
     frames = len(samples) // channels
     raw = array("f", samples)
+    started = False
     try:
         size = len(raw) * raw.itemsize
         buffer_ref = ctypes.POINTER(QueueBuffer)()
@@ -95,21 +134,29 @@ def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop)
         status = lib.AudioQueueStart(queue, None)
         if status != 0:
             raise OutputError("device")
+        started = True
         while not done.wait(0.01):
             if stop.is_set():
                 break
             if _drained(lib, queue):
                 break
-        lib.AudioQueueStop(queue, True)
     finally:
+        if started:
+            lib.AudioQueueStop(queue, True)
         _dispose(handle)
     return OutputSummary(frames, rate, channels, "f32", 0)
 
 
 def _drained(lib, queue) -> bool:
+    function = getattr(lib, "AudioQueueGetProperty", None)
+    if function is None:
+        raise OutputError("none")
     running = ctypes.c_uint32()
-    status = lib.AudioQueueIsRunning(queue, ctypes.byref(running))
-    return status == 0 and running.value == 0
+    size = ctypes.c_uint32(ctypes.sizeof(running))
+    status = function(queue, AUDIO_QUEUE_IS_RUNNING, ctypes.byref(running), ctypes.byref(size))
+    if status != 0 or size.value != ctypes.sizeof(running):
+        raise OutputError("none")
+    return running.value == 0
 
 
 def _open(rate: int, channels: int, lib=None):
@@ -117,6 +164,8 @@ def _open(rate: int, channels: int, lib=None):
     if lib is None:
         return None
     _bind(lib)
+    if getattr(lib, "AudioQueueGetProperty", None) is None:
+        return None
     description = _description(rate, channels)
     queue = ctypes.c_void_p()
     callback = _OUTPUT_CALLBACK(lambda *_args: None)
@@ -134,6 +183,217 @@ def _open(rate: int, channels: int, lib=None):
         _forget(callback)
         return None
     return lib, queue, callback
+
+
+def _default_output():
+    if sys.platform != "darwin":
+        return None
+    coreaudio = _load("CoreAudio")
+    corefoundation = _load("CoreFoundation")
+    if coreaudio is None or corefoundation is None:
+        return None
+    try:
+        _bind(coreaudio)
+        corefoundation.CFStringGetCString.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_long,
+            ctypes.c_uint32,
+        ]
+        corefoundation.CFStringGetCString.restype = ctypes.c_bool
+        corefoundation.CFRelease.argtypes = [ctypes.c_void_p]
+        corefoundation.CFRelease.restype = None
+        device = _default_device(coreaudio)
+        if device is None:
+            return None
+        name = _device_name(coreaudio, corefoundation, device)
+        nominal = _nominal_rates(coreaudio, device)
+        formats = _stream_formats(coreaudio, device, nominal)
+        if name is None or nominal is None or formats is None:
+            return None
+        return name, nominal, formats
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _load(name: str):
+    path = ctypes.util.find_library(name)
+    if not path:
+        return None
+    return ctypes.CDLL(path)
+
+
+def _address(selector: int, scope: int = SCOPE_GLOBAL, element: int = 0):
+    return AudioObjectPropertyAddress(selector, scope, element)
+
+
+def _get_data(function, object_id: int, address, size: int):
+    data = (ctypes.c_char * size)()
+    used = ctypes.c_uint32(size)
+    status = function(object_id, ctypes.byref(address), 0, None, ctypes.byref(used), data)
+    if status != 0 or used.value > size:
+        return None
+    return data.raw[: used.value]
+
+
+def _get_size(function, object_id: int, address) -> int | None:
+    size = ctypes.c_uint32()
+    status = function(object_id, ctypes.byref(address), 0, None, ctypes.byref(size))
+    if status != 0:
+        return None
+    return size.value
+
+
+def _default_device(coreaudio) -> int | None:
+    raw = _get_data(
+        coreaudio.AudioObjectGetPropertyData,
+        SYSTEM_OBJECT,
+        _address(DEFAULT_OUTPUT_DEVICE),
+        ctypes.sizeof(ctypes.c_uint32),
+    )
+    if raw is None or len(raw) != ctypes.sizeof(ctypes.c_uint32):
+        return None
+    device = int.from_bytes(raw, sys.byteorder)
+    return device or None
+
+
+def _device_name(coreaudio, corefoundation, device: int) -> str | None:
+    address = _address(DEVICE_NAME)
+    size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, device, address)
+    if not size or size < ctypes.sizeof(ctypes.c_void_p):
+        return None
+    pointer = ctypes.c_void_p()
+    used = ctypes.c_uint32(ctypes.sizeof(pointer))
+    status = coreaudio.AudioObjectGetPropertyData(
+        device, ctypes.byref(address), 0, None, ctypes.byref(used), ctypes.byref(pointer)
+    )
+    if status != 0 or not pointer.value:
+        return None
+    try:
+        buffer = ctypes.create_string_buffer(512)
+        copied = corefoundation.CFStringGetCString(
+            pointer, buffer, len(buffer), CF_STRING_ENCODING_UTF8
+        )
+        if not copied:
+            return None
+        return buffer.value.decode("utf-8", "replace")
+    finally:
+        corefoundation.CFRelease(pointer)
+
+
+def _nominal_rates(coreaudio, device: int) -> list[float] | None:
+    address = _address(NOMINAL_SAMPLE_RATES)
+    size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, device, address)
+    if size is None:
+        return None
+    count = size // ctypes.sizeof(AudioValueRange)
+    if count <= 0:
+        return []
+    raw = _get_data(
+        coreaudio.AudioObjectGetPropertyData,
+        device,
+        address,
+        count * ctypes.sizeof(AudioValueRange),
+    )
+    if raw is None:
+        return None
+    ranges = (AudioValueRange * count).from_buffer_copy(raw)
+    rates: list[float] = []
+    for item in ranges:
+        rates.append(item.mMinimum)
+        if item.mMaximum != item.mMinimum:
+            rates.append(item.mMaximum)
+    return sorted({rate for rate in rates if rate > 0})
+
+
+def _stream_formats(
+    coreaudio, device: int, nominal: list[float]
+) -> list[tuple[float, float, int]] | None:
+    address = _address(DEVICE_STREAMS)
+    size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, device, address)
+    if size is None:
+        return None
+    count = size // ctypes.sizeof(ctypes.c_uint32)
+    if count == 0:
+        return []
+    raw = _get_data(
+        coreaudio.AudioObjectGetPropertyData,
+        device,
+        address,
+        count * ctypes.sizeof(ctypes.c_uint32),
+    )
+    if raw is None:
+        return None
+    streams = (ctypes.c_uint32 * count).from_buffer_copy(raw)
+    formats: list[tuple[float, float, int]] = []
+    for stream in streams:
+        stream_address = _address(STREAM_AVAILABLE_FORMATS)
+        stream_size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, stream, stream_address)
+        items = []
+        if stream_size:
+            item_size = ctypes.sizeof(AudioStreamRangedDescription)
+            item_count = stream_size // item_size
+            raw_items = _get_data(
+                coreaudio.AudioObjectGetPropertyData,
+                stream,
+                stream_address,
+                item_count * item_size,
+            )
+            if raw_items is not None and item_count:
+                items = list(
+                    (AudioStreamRangedDescription * item_count).from_buffer_copy(raw_items)
+                )
+        if items:
+            for item in items:
+                fmt = item.mFormat
+                if fmt.mFormatID == LINEAR_PCM and fmt.mFormatFlags & 1:
+                    if fmt.mChannelsPerFrame in {1, 2}:
+                        formats.append(
+                            (
+                                item.mSampleRateRange.mMinimum,
+                                item.mSampleRateRange.mMaximum,
+                                int(fmt.mChannelsPerFrame),
+                            )
+                        )
+            continue
+        if _float_physical_format(coreaudio, stream):
+            for rate in nominal:
+                formats.extend([(rate, rate, 1), (rate, rate, 2)])
+    return formats
+
+
+def _float_physical_format(coreaudio, stream: int) -> bool:
+    address = _address(STREAM_PHYSICAL_FORMAT)
+    raw = _get_data(
+        coreaudio.AudioObjectGetPropertyData, stream, address, ctypes.sizeof(StreamDescription)
+    )
+    if raw is None or len(raw) < ctypes.sizeof(StreamDescription):
+        return False
+    description = StreamDescription.from_buffer_copy(raw)
+    return description.mFormatID == LINEAR_PCM and bool(description.mFormatFlags & 1)
+
+
+def _supports(rate: float, channels: int, formats) -> bool:
+    return any(
+        item_channels == channels and minimum <= rate <= maximum
+        for minimum, maximum, item_channels in formats
+    )
+
+
+def _mismatch(rate: int, nominal: list[float], formats) -> str:
+    supported = []
+    for candidate in nominal:
+        channels = (
+            2 if _supports(candidate, 2, formats) else 1 if _supports(candidate, 1, formats) else 0
+        )
+        if channels:
+            text = f"{candidate:g}Hz・f32・{channels}ch"
+            if text not in supported:
+                supported.append(text)
+    range_text = "、".join(supported) if supported else "なし"
+    return (
+        f"必要な形式は{rate}Hzのmonoまたはstereoのf32・i16・i32です。機器の対応範囲: {range_text}"
+    )
 
 
 def _forget(callback) -> None:
@@ -186,12 +446,40 @@ def _bind(lib) -> None:
         "AudioQueueStart": ([ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int32),
         "AudioQueueStop": ([ctypes.c_void_p, ctypes.c_bool], ctypes.c_int32),
         "AudioQueueDispose": ([ctypes.c_void_p, ctypes.c_bool], ctypes.c_int32),
-        "AudioQueueIsRunning": (
-            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)],
+        "AudioQueueGetProperty": (
+            [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)],
             ctypes.c_int32,
         ),
     }
     for name, (argtypes, restype) in signatures.items():
+        function = getattr(lib, name, None)
+        if function is not None:
+            _signature(function, argtypes, restype)
+    for name, argtypes, restype in (
+        (
+            "AudioObjectGetPropertyData",
+            [
+                ctypes.c_uint32,
+                ctypes.POINTER(AudioObjectPropertyAddress),
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.c_void_p,
+            ],
+            ctypes.c_int32,
+        ),
+        (
+            "AudioObjectGetPropertyDataSize",
+            [
+                ctypes.c_uint32,
+                ctypes.POINTER(AudioObjectPropertyAddress),
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint32),
+            ],
+            ctypes.c_int32,
+        ),
+    ):
         function = getattr(lib, name, None)
         if function is not None:
             _signature(function, argtypes, restype)
