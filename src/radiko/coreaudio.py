@@ -111,7 +111,14 @@ def inspect(rate: int, opened=None) -> OutputInfo:
     return OutputInfo(name, rate, None, None, mismatch)
 
 
-def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop) -> OutputSummary:
+def play(
+    samples: list[float],
+    rate: int,
+    channels: int,
+    info: OutputInfo,
+    stop,
+    step_hook=None,
+) -> OutputSummary:
     handle = _open(rate, info.channels or channels)
     if handle is None:
         raise OutputError("none")
@@ -139,13 +146,19 @@ def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop)
             raise OutputError("device")
         started = True
         started_at = time.monotonic()
-        while not done.wait(0.01):
+        deadline = started_at + frames / rate
+        while True:
+            if step_hook is not None:
+                step_hook(played_frames)
+            now = time.monotonic()
             if stop.is_set():
-                elapsed = time.monotonic() - started_at
+                elapsed = now - started_at
                 played_frames = min(frames, max(0, int(elapsed * rate)))
                 break
-            if _drained(lib, queue):
+            remaining = deadline - now
+            if remaining <= 0:
                 break
+            done.wait(min(0.01, remaining))
     finally:
         if started:
             lib.AudioQueueStop(queue, True)

@@ -65,7 +65,7 @@ def test_fake_device_without_the_requested_rate_does_not_declare_support(monkeyp
     assert "44100Hz・f32・2ch" in info.mismatch
 
 
-def test_missing_running_property_still_stops_and_disposes(monkeypatch):
+def test_finite_buffer_completes_when_is_running_stays_one(monkeypatch):
     import threading
 
     from radiko.coreaudio import QueueBuffer, play
@@ -97,7 +97,9 @@ def test_missing_running_property_still_stops_and_disposes(monkeypatch):
             return 0
 
         def AudioQueueGetProperty(self, queue, selector, running, size):
-            return -1
+            ctypes.cast(running, ctypes.POINTER(ctypes.c_uint32))[0] = 1
+            ctypes.cast(size, ctypes.POINTER(ctypes.c_uint32))[0] = ctypes.sizeof(ctypes.c_uint32)
+            return 0
 
         def AudioQueueStop(self, queue, immediate):
             self.order.append("stop")
@@ -109,15 +111,14 @@ def test_missing_running_property_still_stops_and_disposes(monkeypatch):
 
     backend = _Queue()
     monkeypatch.setattr("radiko.coreaudio.library", lambda: backend)
-    with pytest.raises(OutputError) as raised:
-        play(
-            [0.0, 0.0],
-            48000,
-            2,
-            OutputInfo("Fake", 48000, "f32", 2, ""),
-            threading.Event(),
-        )
-    assert raised.value.code == "none"
+    summary = play(
+        [0.0, 0.0],
+        48000,
+        2,
+        OutputInfo("Fake", 48000, "f32", 2, ""),
+        threading.Event(),
+    )
+    assert summary.frames == 1
     assert backend.order[-2:] == ["stop", "dispose"]
 
 
