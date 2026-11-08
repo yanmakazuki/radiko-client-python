@@ -79,6 +79,8 @@ class _Handler(BaseHTTPRequestHandler):
     stop: threading.Event | None = None
     origin_stamp: str | None = None
     login_body = b""
+    live = False
+    media_fetches = 0
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -129,7 +131,15 @@ class _Handler(BaseHTTPRequestHandler):
         elif parsed.path.endswith("/master.m3u8"):
             body = MASTER
         elif parsed.path == "/media.m3u8":
-            if _Handler.origin_stamp:
+            if _Handler.live:
+                _Handler.media_fetches += 1
+                number = _Handler.media_fetches
+                body = (
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:1\n"
+                    f"#EXT-X-MEDIA-SEQUENCE:{6 + number}\n"
+                    f"#EXTINF:1,\n/live{number}.aac\n"
+                ).encode()
+            elif _Handler.origin_stamp:
                 body = (
                     "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n"
                     f"#EXT-X-PROGRAM-DATE-TIME:{_Handler.origin_stamp}\n"
@@ -137,6 +147,10 @@ class _Handler(BaseHTTPRequestHandler):
                 ).encode()
             else:
                 body = MEDIA
+        elif parsed.path.startswith("/live") and parsed.path.endswith(".aac"):
+            if parsed.path != "/live1.aac" and _Handler.stop is not None:
+                _Handler.stop.set()
+            body = ADTS
         elif parsed.path == "/seg.aac":
             body = ADTS
         elif parsed.path == "/v1/programs/SYNTHETIC-2/chapters":
@@ -161,6 +175,8 @@ def _serve():
     _Handler.stop = None
     _Handler.origin_stamp = None
     _Handler.login_body = b""
+    _Handler.live = False
+    _Handler.media_fetches = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -284,6 +300,55 @@ def test_chapters_and_timefree_play_use_the_same_program_endpoint(tmp_path, monk
     assert "/v1/programs/SYNTHETIC-2/chapters" in _Handler.paths
     # null sink は壁時計で1秒待たない。実機の再生時間ではない。
     assert elapsed < 5
+
+
+def test_live_without_endlist_reloads_the_window_instead_of_ending(tmp_path, monkeypatch, capsys):
+    server = _serve()
+    _Handler.live = True
+    _env(monkeypatch, server, tmp_path)
+    started = time.perf_counter()
+    try:
+        code = main(["--data-dir", str(tmp_path), "play-live", "TBS", "--seconds", "2"])
+    finally:
+        server.shutdown()
+    elapsed = time.perf_counter() - started
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert _Handler.media_fetches >= 2
+    assert "/live2.aac" in _Handler.paths
+    assert "番組終了" not in out
+    assert "指定時間で停止しました" in out
+    assert elapsed < 8
+
+
+def test_interactive_switch_rebuilds_playback_for_the_selected_station(tmp_path, monkeypatch):
+    from radiko.auth import MemberClient
+    from radiko.prepare import play_station
+
+    server = _serve()
+    _env(monkeypatch, server, tmp_path)
+    yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y%m%d120000")
+    cursor = datetime.strptime(yesterday, "%Y%m%d%H%M%S").replace(tzinfo=JST)
+    session = MemberSession("synthetic-token")
+    membership = MemberClient.create().check(session)
+    try:
+        report = play_station(
+            "TBS",
+            "timefree",
+            cursor,
+            datetime.now(UTC),
+            session,
+            membership,
+            0.0,
+            1.0,
+            lambda: False,
+            commands=["live TBS"],
+        )
+    finally:
+        server.shutdown()
+    assert report.mode == "Live"
+    assert report.station == "TBS"
+    assert report.reason in {"limit", "program-end"}
 
 
 def test_segment_cancel_stops_before_claiming_playback(tmp_path, monkeypatch, capsys):

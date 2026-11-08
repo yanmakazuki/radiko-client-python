@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from radiko.stream import validate_station
+from datetime import datetime, timezone
+
+from radiko.stream import parse_time, validate_station
 
 
 class InteractiveControl:
@@ -18,6 +20,7 @@ class InteractiveControl:
         self.messages: list[str] = []
         self.accepted: list[float] = []
         self.applied = 0
+        self.selected: tuple[str, str, datetime, float] | None = None
 
     def handle(self, line: str) -> None:
         text = line.strip()
@@ -81,9 +84,43 @@ class InteractiveControl:
             except Exception:
                 self.messages.append("切替不可: 局・日時・開始位置を確認してください")
                 return
-            self.station = parts[1]
-            self.mode = "live" if parts[0] == "live" else "timefree"
-            self._request(0.0)
+            mode = parts[0]
+            offset = 0.0
+            now = datetime.now(timezone.utc)
+            if mode == "timefree":
+                if len(parts) < 3:
+                    self.messages.append("切替不可: timefreeには日時が必要です")
+                    return
+                try:
+                    cursor = parse_time(parts[2])
+                except Exception:
+                    self.messages.append(
+                        "切替不可: 日時は日本時間のYYYYMMDDHHmmssで指定してください"
+                    )
+                    return
+                rest = parts[3:]
+                if rest:
+                    if len(rest) != 2 or rest[0] != "--offset":
+                        self.messages.append("切替不可: 日時と--offsetの指定を確認してください")
+                        return
+                    try:
+                        offset = float(rest[1])
+                    except ValueError:
+                        self.messages.append("切替不可: 位置は0〜86400秒で指定してください")
+                        return
+                    if not 0 <= offset <= 86400:
+                        self.messages.append("切替不可: 位置は0〜86400秒で指定してください")
+                        return
+                if cursor > now:
+                    self.messages.append("切替不可: 放送前のため配信取得できません")
+                    return
+            else:
+                if len(parts) > 2:
+                    self.messages.append("切替不可: liveに日時は指定できません")
+                    return
+                cursor = now
+            self.selected = (mode, parts[1], cursor, offset)
+            self._request(offset)
             return
         self.messages.append(
             "live 局ID / timefree 局ID YYYYMMDDHHmmss [--offset 秒数] / status / pause / "

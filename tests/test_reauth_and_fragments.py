@@ -380,7 +380,7 @@ def test_cancel_during_408_backoff_does_not_fetch_again(tmp_path, monkeypatch):
     finally:
         server.shutdown()
     assert report.reason == "cancelled"
-    assert report.frames == 0
+    assert report.frames > 0
     assert state.paths.count("/out/b.aac") == 1
     assert state.paths.count("/out/a.aac") == 1
 

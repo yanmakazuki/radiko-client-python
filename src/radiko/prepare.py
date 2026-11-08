@@ -7,7 +7,7 @@ import secrets
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from radiko.auth import partial_key
@@ -769,6 +769,7 @@ def _play_station(
         raise ProbeError("endpoint")
     playlist_url, media = _open_media(urls[0], headers, cancelled)
     from radiko.fragmented import FragmentedAacDecoder
+    from radiko.hls import HlsCursor
     from radiko.reauth import ReauthState
 
     reauth = ReauthState(session, cancelled, now=reauth_now)
@@ -780,16 +781,22 @@ def _play_station(
     budget = ReconnectBudget(cancelled, sleep=reconnect_sleep)
     pending_commands = list(commands) if isinstance(commands, list) else []
     stamp = None
-    samples: list[float] = []
     rate = 48000
     channels = 2
     taken = 0
+    played_frames = 0
+    underrun_frames = 0
     media_seconds = 0.0
     reason = "program-end"
     decoder = AdtsDecoder()
     fragment_decoder = None
     init_uri = None
     sequence = media.media_sequence
+    if mode == "live":
+        live_cursor = HlsCursor.start(media, True)
+        sequence = live_cursor.next_sequence
+        control.messages.extend(live_cursor.messages)
+        live_cursor.messages.clear()
     pending = None
     if position:
         pending = (program.start + timedelta(seconds=position), position)
@@ -813,6 +820,24 @@ def _play_station(
                     on_notice(message)
             if control.stopped:
                 break
+        if control.selected is not None:
+            new_mode, new_station, new_cursor, new_offset = control.selected
+            control.selected = None
+            return _play_station(
+                new_station,
+                new_mode,
+                new_cursor,
+                datetime.now(timezone.utc),
+                session,
+                membership,
+                new_offset,
+                limit,
+                cancelled,
+                [] if isinstance(commands, list) else commands,
+                reconnect_sleep,
+                reauth_now,
+                on_notice,
+            )
         if control.stopped or cancelled():
             reason = "cancelled"
             break
@@ -823,8 +848,22 @@ def _play_station(
             control, media, sequence, media_seconds, program.start, pending
         )
         if sequence >= media.media_sequence + len(media.segments):
-            reason = "program-end"
-            break
+            if media.end_list:
+                reason = "program-end"
+                break
+            try:
+                media, playlist_url, sequence = _reload_window(
+                    playlist_url, headers, cancelled, media, sequence, mode, control
+                )
+            except ProbeError as error:
+                if _cancelled_error(error) or cancelled():
+                    reason = "cancelled"
+                    break
+                if budget.can_retry(error, taken > 0):
+                    budget.wait()
+                    continue
+                raise
+            continue
         segment = _segment_at(media, sequence)
         if segment is None:
             raise ProbeError("window")
@@ -861,9 +900,7 @@ def _play_station(
                 cancelled,
             )
         except ProbeError as error:
-            if error.code == "cancelled" or (
-                error.code == "at" and error.inner is not None and error.inner.code == "cancelled"
-            ):
+            if _cancelled_error(error):
                 reason = "cancelled"
                 break
             if budget.can_retry(error, taken > 0):
@@ -880,11 +917,7 @@ def _play_station(
                     media = parse_media_playlist(reply.body.decode())
                     playlist_url = reply.url
                 except ProbeError as waited:
-                    if waited.code == "cancelled" or (
-                        waited.code == "at"
-                        and waited.inner is not None
-                        and waited.inner.code == "cancelled"
-                    ):
+                    if _cancelled_error(waited):
                         reason = "cancelled"
                         break
                     if budget.can_retry(waited, True):
@@ -924,6 +957,7 @@ def _play_station(
             piece, frame_count = trimmed
             media_seconds = target_seconds
             pending = None
+        stop_piece = _StopView(lambda: cancelled() or control.stopped)
         if limit is not None:
             room = limit - media_seconds
             if room <= 0:
@@ -932,12 +966,19 @@ def _play_station(
             max_frames = int(room * rate)
             if frame_count > max_frames:
                 piece = piece[: max_frames * channels]
-                samples.extend(piece)
+                summary = play_samples(piece, rate, channels, stop_piece, volume=control.volume)
+                played_frames += summary.frames
+                underrun_frames += summary.underrun_frames
+                rate, channels = summary.sample_rate, summary.channels
                 taken += 1
                 sequence += 1
                 reason = "limit"
                 break
-        samples.extend(piece)
+        if piece:
+            summary = play_samples(piece, rate, channels, stop_piece, volume=control.volume)
+            played_frames += summary.frames
+            underrun_frames += summary.underrun_frames
+            rate, channels = summary.sample_rate, summary.channels
         media_seconds += len(piece) / channels / rate
         taken += 1
         sequence += 1
@@ -947,16 +988,13 @@ def _play_station(
             break
     if cancelled():
         reason = "cancelled"
-    summary = None
-    if samples and reason != "cancelled" and not control.paused:
-        summary = play_samples(samples, rate, channels, volume=control.volume)
     return PlayReport(
         reason,
-        0 if summary is None else summary.frames,
-        rate if summary is None else summary.sample_rate,
-        channels if summary is None else summary.channels,
+        played_frames,
+        rate,
+        channels,
         taken,
-        0 if summary is None else summary.underrun_frames,
+        underrun_frames,
         program.title,
         station,
         "Live" if mode == "live" else "TimeFree",
@@ -964,6 +1002,53 @@ def _play_station(
         program.end,
         control.messages,
     )
+
+
+class _StopView:
+    def __init__(self, function) -> None:
+        self.function = function
+
+    def is_set(self) -> bool:
+        return self.function()
+
+
+def _cancelled_error(error) -> bool:
+    return error.code == "cancelled" or (
+        error.code == "at" and error.inner is not None and error.inner.code == "cancelled"
+    )
+
+
+def _reload_window(url, headers, cancelled, media, sequence, mode, control):
+    from radiko.hls import HlsCursor
+    from radiko.stream import ProbeError
+
+    wait = max(media.target_duration / 2.0, 0.05)
+    end = time.monotonic() + wait
+    while True:
+        if cancelled():
+            raise ProbeError("cancelled")
+        left = end - time.monotonic()
+        if left <= 0:
+            break
+        time.sleep(min(0.05, left))
+    reply = stream_get(
+        url,
+        headers,
+        limit=TEXT_LIMIT,
+        cancelled=cancelled,
+        redirects=True,
+        readonly_retry=True,
+    )
+    updated = parse_media_playlist(reply.body.decode())
+    if mode == "live":
+        cursor = HlsCursor(True, media, sequence)
+        cursor.install(updated)
+        control.messages.extend(cursor.messages)
+        cursor.messages.clear()
+        return cursor.media, reply.url, cursor.next_sequence
+    if sequence < updated.media_sequence:
+        raise ProbeError("window")
+    return updated, reply.url, sequence
 
 
 def _open_media(url: str, headers: dict[str, str], cancelled):
