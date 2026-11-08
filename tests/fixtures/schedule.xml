@@ -1,0 +1,7 @@
+<radiko><stations><station id="TBS"><name>テスト局</name><progs>
+<prog id="same" ft="20261016003000" to="20261016050000"><title>深夜</title><genre/></prog>
+<prog id="same" ft="20261015060000" to="20261015070000"><title><![CDATA[朝 & 続編]]></title><pfm>出演者</pfm><genre><program id="UNKNOWN"><name>未知分類</name></program><personality id="C999"><name>出演分類</name></personality></genre><tag><item><name>タグ</name></item><item><name>タグ</name></item></tag></prog>
+<prog id="first" ft="20261015045900" to="20261015060000"><title>境界 &amp; 番組</title></prog>
+<prog id="duplicate" ft="20261015060000" to="20261015070000"><title>重複</title></prog>
+<prog ft="invalid" to="20261015070000"><title>不正</title></prog>
+</progs></station></stations></radiko>

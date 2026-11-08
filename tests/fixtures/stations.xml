@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<stations area_id="JP13" area_name="Test area">
+  <station><id>TBS</id><name><![CDATA[テスト & 局]]></name><areafree>0</areafree><logo>https://example.invalid/logo</logo></station>
+  <station><id>RN1</id><name>全国共通局</name></station>
+  <station><id>TBS</id><name>重複</name></station>
+</stations>

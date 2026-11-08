@@ -1,0 +1,6 @@
+{"chapters":[
+  {"title":"本題","fromSec":30,"toSec":60},
+  {"title":"短い題","titleLong":"オープニング","fromSec":0,"toSec":30},
+  {"title":"楽曲","fromSec":60,"toSec":90,"isMusic":true},
+  {"title":"不正","fromSec":-1,"toSec":10}
+]}

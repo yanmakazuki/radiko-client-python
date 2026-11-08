@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radiko-client"
+version = "0.1.0"
+description = "番組表、認証、再生、保存を扱う radiko クライアントの Python 移植"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "yanma" }]
+dependencies = [
+  "av==14.2.0",
+  "numpy==1.26.4",
+  "regex==2026.11.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.5", "ruff==0.14.2"]
+
+[project.scripts]
+radiko-client = "radiko_client.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+radiko_client = ["help_text.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
