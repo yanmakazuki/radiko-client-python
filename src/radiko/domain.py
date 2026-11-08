@@ -22,13 +22,13 @@ def parse_jst(text: str) -> datetime:
 
 
 def rfc3339(moment: datetime) -> str:
-    local = moment.astimezone(JST)
-    return (
-        local.strftime("%Y-%m-%dT%H:%M:%S")
-        + local.strftime("%z")[:3]
-        + ":"
-        + local.strftime("%z")[3:]
-    )
+    """端末のタイムゾーンではなく、値が持つ UTC オフセットを保つ。"""
+    offset = moment.strftime("%z")
+    fraction = ""
+    if moment.microsecond:
+        digits = f"{moment.microsecond:06d}"
+        fraction = "." + (digits[:3] if moment.microsecond % 1000 == 0 else digits)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S") + fraction + offset[:3] + ":" + offset[3:]
 
 
 def broadcast_day(now: datetime) -> date:

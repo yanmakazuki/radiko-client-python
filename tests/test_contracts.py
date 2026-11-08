@@ -18,11 +18,13 @@ from radiko.domain import (
     SearchCriteria,
     broadcast_day,
     broadcast_status,
+    rfc3339,
 )
 from radiko.hls import HlsCursor, parse_media_playlist
+from radiko.http_client import _allowed
 from radiko.media import AacError, validate_mp4
 from radiko.storage import MemberSession, Membership, SearchStore, SessionStore
-from radiko.stream import SlotProgram, availability, deadline_pair, eligible
+from radiko.stream import ProbeError, SlotProgram, availability, deadline_pair, eligible
 from radiko.stream import parse_time as stream_time
 
 ROOT = Path(__file__).parent / "fixtures"
@@ -228,6 +230,56 @@ def test_hls_live_ignores_a_slightly_older_window_and_timefree_does_not():
     with pytest.raises(Exception) as lost:
         timefree.install(playlist(13, 1, end=True))
     assert "続きを再生できなくなりました" in str(lost.value)
+
+
+def test_hls_rejects_features_the_rust_parser_refuses():
+    base = ["#EXTM3U", "#EXT-X-TARGETDURATION:5", "#EXT-X-MEDIA-SEQUENCE:1"]
+    for feature in [
+        '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+        "#EXT-X-BYTERANGE:100@0",
+        "#EXT-X-I-FRAMES-ONLY",
+        '#EXT-X-MAP:URI=""',
+    ]:
+        text = "\n".join([*base, feature, "#EXTINF:5,", "s1.aac"])
+        with pytest.raises(ProbeError) as rejected:
+            parse_media_playlist(text)
+        assert rejected.value.code == "playlist"
+    allowed = "\n".join([*base, "#EXT-X-KEY:METHOD=NONE", "#EXTINF:5,", "s1.aac"])
+    assert parse_media_playlist(allowed).segments[0].uri == "s1.aac"
+
+
+def test_rfc3339_keeps_the_offset_and_microseconds_of_the_value():
+    utc = datetime(2026, 10, 15, 5, 0, 0, 123000, tzinfo=timezone.utc)
+    assert rfc3339(utc) == "2026-10-15T05:00:00.123+00:00"
+    jst = datetime(2026, 10, 15, 14, 0, 0, tzinfo=JST)
+    assert rfc3339(jst) == "2026-10-15T14:00:00+09:00"
+
+
+def test_chapter_boolean_time_fields_are_invalid_like_the_rust_parser():
+    body = json.dumps({"chapters": [{"fromSec": 0, "toSec": True, "title": "not a time"}]}).encode()
+    with pytest.raises(Exception) as rejected:
+        parse_chapters(body, 90.0, 0.0)
+    assert "有効なチャプターがありません" in str(rejected.value)
+
+
+def test_http_only_accepts_exact_trusted_hosts_and_a_local_port():
+    for url in [
+        "https://radiko.jp/a",
+        "https://api.radiko.jp/a",
+        "https://dr-wowza.radiko-cf.com/a",
+        "http://127.0.0.1:9/a",
+    ]:
+        _allowed(url)
+    for url in [
+        "https://evilradiko.jp/a",
+        "https://radiko.jp.evil.invalid/a",
+        "http://radiko.jp/a",
+        "https://radiko.jp:444/a",
+        "https://user@radiko.jp/a",
+    ]:
+        with pytest.raises(ProbeError) as rejected:
+            _allowed(url)
+        assert rejected.value.code == "unsafe"
 
 
 def test_huge_mp4_sample_count_is_rejected_before_decode():

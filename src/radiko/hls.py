@@ -17,6 +17,9 @@ class Segment:
     discontinuity: bool = False
     program_date: str | None = None
     map_uri: str | None = None
+    byte_range: bool = False
+    encrypted: bool = False
+    bad_map: bool = False
 
 
 @dataclass
@@ -26,6 +29,7 @@ class MediaPlaylist:
     segments: list[Segment]
     end_list: bool = False
     version: int | None = None
+    i_frames_only: bool = False
 
 
 @dataclass
@@ -127,14 +131,20 @@ def validate_media(media: MediaPlaylist) -> None:
         or len(media.segments) > MAX_ITEMS
         or media.target_duration <= 0
         or media.target_duration > 60
+        or media.i_frames_only
         or any(
             segment.duration != segment.duration
             or segment.duration <= 0
             or segment.duration > 120
             or not segment.uri
+            or segment.byte_range
+            or segment.encrypted
+            or segment.bad_map
             for segment in media.segments
         )
     ):
+        raise ProbeError("playlist")
+    if media.media_sequence < 0:
         raise ProbeError("playlist")
     if media.media_sequence + len(media.segments) > 2**64 - 1:
         raise ProbeError("playlist")
@@ -169,38 +179,65 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
     sequence = 0
     target = None
     end_list = False
+    i_frames_only = False
     segments: list[Segment] = []
     duration = None
     discontinuity = False
     program_date = None
     map_uri = None
+    map_bad = False
+    encrypted = False
+    byte_range = False
     for line in lines[1:]:
-        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
-            sequence = int(line.split(":", 1)[1])
-        elif line.startswith("#EXT-X-TARGETDURATION:"):
-            target = int(line.split(":", 1)[1])
-        elif line == "#EXT-X-ENDLIST":
-            end_list = True
-        elif line == "#EXT-X-DISCONTINUITY":
-            discontinuity = True
-        elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
-            program_date = line.split(":", 1)[1]
-        elif line.startswith("#EXT-X-MAP:"):
-            map_uri = _attr(line, "URI")
-        elif line.startswith("#EXTINF:"):
-            duration = float(line.split(":", 1)[1].split(",")[0])
-        elif line.startswith("#"):
-            continue
-        else:
-            if duration is None:
-                raise ProbeError("playlist")
-            segments.append(Segment(line, duration, discontinuity, program_date, map_uri))
-            duration = None
-            discontinuity = False
-            program_date = None
+        try:
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                sequence = int(line.split(":", 1)[1])
+            elif line.startswith("#EXT-X-TARGETDURATION:"):
+                target = int(line.split(":", 1)[1])
+            elif line == "#EXT-X-ENDLIST":
+                end_list = True
+            elif line == "#EXT-X-I-FRAMES-ONLY":
+                i_frames_only = True
+            elif line == "#EXT-X-DISCONTINUITY":
+                discontinuity = True
+            elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+                program_date = line.split(":", 1)[1]
+            elif line.startswith("#EXT-X-MAP:"):
+                map_uri = _attr(line, "URI")
+                map_bad = not map_uri or "BYTERANGE=" in line
+            elif line.startswith("#EXT-X-BYTERANGE:"):
+                byte_range = True
+            elif line.startswith("#EXT-X-KEY:"):
+                method = _attr(line, "METHOD")
+                encrypted = method not in {None, "NONE"}
+            elif line.startswith("#EXTINF:"):
+                duration = float(line.split(":", 1)[1].split(",")[0])
+            elif line.startswith("#"):
+                continue
+            else:
+                if duration is None:
+                    raise ProbeError("playlist")
+                segments.append(
+                    Segment(
+                        line,
+                        duration,
+                        discontinuity,
+                        program_date,
+                        map_uri,
+                        byte_range,
+                        encrypted,
+                        map_bad,
+                    )
+                )
+                duration = None
+                discontinuity = False
+                program_date = None
+                byte_range = False
+        except ValueError as error:
+            raise ProbeError("playlist") from error
     if target is None:
         raise ProbeError("playlist")
-    media = MediaPlaylist(sequence, target, segments, end_list)
+    media = MediaPlaylist(sequence, target, segments, end_list, i_frames_only=i_frames_only)
     validate_media(media)
     return media
 

@@ -25,6 +25,9 @@ class Reply:
         self.url = url
 
 
+_TRUSTED_SUFFIXES = ("radiko.jp", "radiko-cf.com", "smartstream.ne.jp")
+
+
 def _allowed(url: str) -> None:
     parsed = urlparse(url)
     if parsed.username or parsed.password:
@@ -32,7 +35,11 @@ def _allowed(url: str) -> None:
     host = parsed.hostname or ""
     if parsed.scheme == "http" and host == "127.0.0.1" and parsed.port:
         return
-    if parsed.scheme == "https" and host.endswith(("radiko.jp", "radiko-cf.com")):
+    if (
+        parsed.scheme == "https"
+        and parsed.port in {None, 443}
+        and any(host == suffix or host.endswith(f".{suffix}") for suffix in _TRUSTED_SUFFIXES)
+    ):
         return
     raise ProbeError("unsafe")
 

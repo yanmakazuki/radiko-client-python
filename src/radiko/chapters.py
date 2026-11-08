@@ -54,6 +54,7 @@ def parse_chapters(data: bytes, slot_seconds: float, offset_seconds: float) -> C
             not isinstance(start, (int, float))
             or not isinstance(end, (int, float))
             or isinstance(start, bool)
+            or isinstance(end, bool)
         ):
             result.invalid_count += 1
             continue
