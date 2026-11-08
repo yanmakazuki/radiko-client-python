@@ -67,15 +67,20 @@ def get(
             ):
                 if attempt < retries and not cancelled():
                     attempt += 1
-                    time.sleep(min(0.05 * attempt, 0.2))
+                    time.sleep(_retry_delay_ms(attempt - 1) / 1000)
                     continue
             raise
         if reply.status == 408 or 500 <= reply.status <= 599:
             if attempt < retries and not cancelled():
+                time.sleep(_retry_delay_ms(attempt) / 1000)
                 attempt += 1
-                time.sleep(min(0.05 * attempt, 0.2))
                 continue
         return reply
+
+
+def _retry_delay_ms(retries: int) -> float:
+    """Rust の 100ms * 2^n に 0〜49ms のジッタを足す。"""
+    return 100 * (1 << retries) + (time.time_ns() // 1_000_000 % 50)
 
 
 def _once(url: str, headers: dict[str, str], limit: int, timeout: float, cancelled) -> Reply:
