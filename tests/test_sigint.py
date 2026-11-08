@@ -24,7 +24,7 @@ def test_muted_probe_exits_zero_on_sigint_without_traceback(monkeypatch, capsys)
 
     from radiko_client import cli
 
-    def fake_probe(seconds, stop):
+    def fake_probe(seconds, stop, on_progress=None):
         assert stop.wait(2)
         return SimpleNamespace(
             frames=0, sample_rate=48000, sample_format="f32", channels=2, underrun_frames=0
