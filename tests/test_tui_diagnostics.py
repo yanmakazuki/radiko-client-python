@@ -83,10 +83,20 @@ def test_program_fetch_failure_is_listed_on_the_status_panel(tmp_path, monkeypat
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("RADIKO_CATALOG_ORIGIN", f"http://127.0.0.1:{server.server_port}")
+    from radiko.domain import BroadcastRange, Filter, Scope, SearchCriteria
+
     screen = Screen([], datetime(2026, 10, 15, 12, 0, tzinfo=JST), offline=False, station_id="TBS")
+    screen.criteria = SearchCriteria.create(
+        Scope.station("TBS"),
+        BroadcastRange.single(datetime(2026, 10, 15, tzinfo=JST).date()),
+        Filter.create(),
+    )
     try:
         screen.handle("r")
         perform_pending(screen)
+        from radiko_client.tui import wait_jobs
+
+        wait_jobs(screen)
     finally:
         server.shutdown()
     screen.area = "failures"

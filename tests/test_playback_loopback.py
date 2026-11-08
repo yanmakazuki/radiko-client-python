@@ -337,6 +337,9 @@ def test_tui_login_and_chapter_play_trim_the_segment(tmp_path, monkeypatch):
     screen.handle("c")
     try:
         perform_pending(screen)
+        from radiko_client.tui import wait_jobs
+
+        wait_jobs(screen)
         assert screen.chapters[0][0] == 10.0
         assert screen.chapters[0][2] == "本題"
         screen.area = "chapters"
@@ -347,10 +350,12 @@ def test_tui_login_and_chapter_play_trim_the_segment(tmp_path, monkeypatch):
         screen.chapter_index = 0
         screen.handle("enter")
         perform_pending(screen)
+        wait_jobs(screen)
         trimmed = screen.played_frames
         screen.chapters = [(0.0, 1.0, "先頭")]
         screen.handle("enter")
         perform_pending(screen)
+        wait_jobs(screen)
         whole = screen.played_frames
     finally:
         server.shutdown()

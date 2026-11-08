@@ -6,7 +6,7 @@ import json
 import secrets
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -114,6 +114,7 @@ class ChapterView:
     music: int = 0
     invalid: int = 0
     rows: list[tuple[float, float, str]] | None = None
+    summaries: list[str] = field(default_factory=list)
 
 
 def fetch_program(station: str, cursor: datetime, cancelled) -> ResolvedProgram:
@@ -1046,6 +1047,7 @@ def inspect_remote_chapters(station: str, cursor: datetime, cancelled=None) -> C
     view.music = parsed.music_count
     view.invalid = parsed.invalid_count
     view.rows = [(item.start, item.end, item.title) for item in parsed.chapters]
+    view.summaries = [item.summary for item in parsed.chapters]
     return view
 
 

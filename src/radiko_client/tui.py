@@ -11,9 +11,11 @@ from pathlib import Path
 from radiko.catalog import parse_programs
 from radiko.domain import (
     STATUS_LABEL,
+    BroadcastRange,
     BroadcastStatus,
     Filter,
     Program,
+    Scope,
     SearchCriteria,
     broadcast_day,
     broadcast_status,
@@ -41,6 +43,76 @@ COMPACT_HEIGHT = 29
 HINT_ITEMS = ["? 操作一覧", "Enter 再生", "Space 一時停止", "q 終了"]
 NOTICE_HOLD = 5
 DIALOG_AREAS = {"help", "device", "failures", "named", "chapters", "logout"}
+AREA_CHOICES = ["全国", *[f"JP{number}" for number in range(1, 48)]]
+
+
+@dataclass
+class FilterForm:
+    """全条件。F2 は検索せず、Enter で条件を確定する。"""
+
+    start: str
+    end: str
+    scope: str
+    genres: str = ""
+    personalities: str = ""
+    keyword: str = ""
+    unclassified_program: bool = False
+    unclassified_personality: bool = False
+    focus: int = 0
+    error: str = ""
+    picker: list[str] | None = None
+    picker_index: int = 0
+    picker_field: int | None = None
+
+    def line(self) -> str:
+        if self.picker is not None:
+            current = self.picker[self.picker_index]
+            return f"名称選択: {current}\n上下 選択 / Enter 条件へ反映（検索しません） / Esc 取消"
+        labels = [
+            f"開始: {self.start}",
+            f"終了: {self.end or '（開始と同じ）'}",
+            f"範囲: {self.scope}",
+            f"番組ジャンル: {self.genres or '指定なし'}",
+            f"出演者分類: {self.personalities or '指定なし'}",
+            f"キーワード: {self.keyword or '指定なし'}",
+            f"番組未分類: {'オン' if self.unclassified_program else 'オフ'}",
+            f"出演者未分類: {'オン' if self.unclassified_personality else 'オフ'}",
+            "観測した分類",
+        ]
+        body = "\n".join(
+            f"{'>' if index == self.focus else ' '} {label}" for index, label in enumerate(labels)
+        )
+        hint = "Tab・上下 項目 / F2 地域・分類を名称選択 / Space 未分類 / Enter 検索 / Esc 取消"
+        return f"{body}\n{self.error}\n{hint}"
+
+    def criteria(self) -> SearchCriteria:
+        from radiko.catalog import parse_day
+
+        start = parse_day(self.start)
+        end = start if not self.end.strip() else parse_day(self.end.strip())
+        scope_text = self.scope.strip()
+        if scope_text in {"全国", "all", "ALL"}:
+            scope = Scope.nationwide()
+        elif scope_text.startswith("局:") or scope_text.lower().startswith("station:"):
+            station = scope_text.split(":", 1)[1].strip()
+            scope = Scope.station(station)
+        else:
+            areas = [item.strip() for item in scope_text.split(",") if item.strip()]
+            scope = Scope.areas(areas)
+        keyword = self.keyword.strip() or None
+        genres = [item.strip() for item in self.genres.split(",") if item.strip()]
+        personalities = [item.strip() for item in self.personalities.split(",") if item.strip()]
+        return SearchCriteria.create(
+            scope,
+            BroadcastRange.new(start, end),
+            Filter.create(
+                genres,
+                personalities,
+                self.unclassified_program,
+                self.unclassified_personality,
+                keyword,
+            ),
+        )
 
 
 def help_text() -> str:
@@ -311,6 +383,26 @@ class Screen:
     play_mode: str = "timefree"
     auth_refresh: bool = False
     data_dir: Path | None = None
+    criteria: SearchCriteria | None = None
+    chapter_summaries: list[str] = field(default_factory=list)
+    chapter_summary_focused: bool = False
+    chapter_scroll: int = 0
+    filter_form: FilterForm | None = None
+    job_generation: int = 0
+    job_cancel: object | None = None
+    job_box: object | None = None
+    job_thread: object | None = None
+
+    def _quit(self) -> None:
+        self.quit = True
+        cancel = self.job_cancel
+        if cancel is not None:
+            cancel.set()
+
+    def ensure_criteria(self) -> SearchCriteria:
+        if self.criteria is None:
+            self.criteria = SearchCriteria.initial(self.now)
+        return self.criteria
 
     def visible(self) -> list[Program]:
         return [program for program in self.programs if self.committed.matches(program)]
@@ -319,13 +411,16 @@ class Screen:
         self.clock += 0.05
         self._expire_info()
         if key == "ctrl-c":
-            self.quit = True
+            self._quit()
             return
         if self.area == "login":
             self._login_key(key)
             return
         if self.area == "chapters":
             self._chapters(key)
+            return
+        if self.area == "filter":
+            self._filter_key(key)
             return
         if self.area == "keyword":
             self._keyword(key)
@@ -348,7 +443,7 @@ class Screen:
             return
         self._dismiss_for_key(key)
         if key in {"q"}:
-            self.quit = True
+            self._quit()
             return
         if key in {"j", "down"}:
             self.selected = min(self.selected + 1, max(len(self.visible()) - 1, 0))
@@ -366,7 +461,7 @@ class Screen:
             self.area = "keyword"
             self.draft_keyword = LineEditor.new(self.committed.keyword or "", 1024)
         elif key == "f":
-            self.area = "filter"
+            self._open_filter()
         elif key == "b":
             self._open_named()
         elif key == "?":
@@ -450,6 +545,8 @@ class Screen:
             return self._framed("取得状況・未取得範囲", self._failures_body())
         if self.area == "seconds":
             return self._framed("位置指定", self._seconds_body())
+        if self.area == "filter" and self.filter_form is not None:
+            return self._framed("全条件", self.filter_form.line())
         if self.area == "login":
             return self._framed("ログイン（パスワード非表示）", self._login_body())
         if self.area == "chapters":
@@ -582,12 +679,125 @@ class Screen:
 
     def _chapter_body(self) -> str:
         if not self.chapters:
-            return "チャプター未提供"
+            notice = self.notice.text if self.notice else ""
+            return "チャプター未提供" + (f"\n{notice}" if notice else "")
         lines = []
         for index, (begin, finish, title) in enumerate(self.chapters):
             mark = ">" if index == self.chapter_index else " "
             lines.append(f"{mark} {begin:.3f}–{finish:.3f}秒 {title}")
+        summary = ""
+        if self.chapter_summaries and self.chapter_index < len(self.chapter_summaries):
+            summary = self.chapter_summaries[self.chapter_index]
+        shown = summary[self.chapter_scroll : self.chapter_scroll + 1200]
+        if self.chapter_summary_focused:
+            lines.append("要約（先頭1200文字まで）・上下/ページ スクロール・Tab 章一覧")
+        else:
+            lines.append("選択したチャプターの要約（Tabで拡大・スクロール）")
+        lines.append(shown)
         return "\n".join(lines)
+
+    def _open_filter(self) -> None:
+        criteria = self.ensure_criteria()
+        scope = criteria.scope
+        if scope.kind == "nationwide":
+            scope_text = "全国"
+        elif scope.kind == "station":
+            scope_text = f"局:{scope.value}"
+        else:
+            scope_text = ",".join(scope.value or [])
+        end = ""
+        if criteria.range.start != criteria.range.end:
+            end = criteria.range.end.strftime("%Y%m%d")
+        self.filter_form = FilterForm(
+            criteria.range.start.strftime("%Y%m%d"),
+            end,
+            scope_text,
+            ",".join(criteria.filter.program_genres),
+            ",".join(criteria.filter.personality_genres),
+            criteria.filter.keyword or "",
+            criteria.filter.unclassified_program,
+            criteria.filter.unclassified_personality,
+        )
+        self.area = "filter"
+
+    def _filter_key(self, key: str) -> None:
+        form = self.filter_form
+        if form is None:
+            self.area = "list"
+            return
+        if form.picker is not None:
+            if key in {"esc", "q"}:
+                form.picker = None
+                return
+            if key in {"j", "down"}:
+                form.picker_index = min(form.picker_index + 1, len(form.picker) - 1)
+                return
+            if key in {"k", "up"}:
+                form.picker_index = max(form.picker_index - 1, 0)
+                return
+            if key == "enter":
+                chosen = form.picker[form.picker_index]
+                if form.picker_field == 2:
+                    form.scope = chosen
+                elif form.picker_field == 3:
+                    form.genres = chosen.split(" ", 1)[0]
+                elif form.picker_field == 4:
+                    form.personalities = chosen.split(" ", 1)[0]
+                form.picker = None
+            return
+        if key == "esc":
+            self.area = "list"
+            self.filter_form = None
+            return
+        if key in {"tab", "down"}:
+            form.focus = (form.focus + 1) % 9
+            return
+        if key == "up":
+            form.focus = (form.focus + 8) % 9
+            return
+        if key == "f2":
+            if form.focus == 2:
+                form.picker = list(AREA_CHOICES)
+                form.picker_index = 0
+                form.picker_field = 2
+            elif form.focus in {3, 4}:
+                form.picker = ["UNKNOWN 未知分類", "C999 出演分類"]
+                form.picker_index = 0
+                form.picker_field = form.focus
+            return
+        if key == " " and form.focus == 6:
+            form.unclassified_program = not form.unclassified_program
+            return
+        if key == " " and form.focus == 7:
+            form.unclassified_personality = not form.unclassified_personality
+            return
+        if key == "enter":
+            try:
+                self.criteria = form.criteria()
+            except (ValueError, Exception) as error:
+                form.error = str(error)
+                return
+            self.committed = self.criteria.filter
+            self.filter_form = None
+            self._commit_search()
+            return
+        target = {
+            0: "start",
+            1: "end",
+            2: "scope",
+            3: "genres",
+            4: "personalities",
+            5: "keyword",
+        }.get(form.focus)
+        if target is None:
+            return
+        current = getattr(form, target)
+        if key == "ctrl-u":
+            setattr(form, target, "")
+        elif key == "backspace":
+            setattr(form, target, current[:-1])
+        elif len(key) == 1 and key.isprintable():
+            setattr(form, target, current + key)
 
     def _framed(self, title: str, body: str) -> list[str]:
         lines = [truncate_width(f"┌ {title}", self.width)]
@@ -643,8 +853,18 @@ class Screen:
                     self.mail += key
 
     def _chapters(self, key: str) -> None:
+        if key == "tab":
+            self.chapter_summary_focused = not self.chapter_summary_focused
+            return
         if key in {"q", "esc"}:
             self.area = "list"
+            self.chapter_summary_focused = False
+            return
+        if self.chapter_summary_focused and key in {"j", "down"}:
+            self.chapter_scroll += 1
+            return
+        if self.chapter_summary_focused and key in {"k", "up"}:
+            self.chapter_scroll = max(0, self.chapter_scroll - 1)
             return
         if key in {"j", "down"} and self.chapters:
             self.chapter_index = min(self.chapter_index + 1, len(self.chapters) - 1)
@@ -946,8 +1166,17 @@ class Screen:
             name = self.draft_name.value
             if name in self.named:
                 criteria = self.named[name]
+                self.criteria = criteria
                 self.committed = criteria.filter
-                self._set_notice(NoticeLevel.INFO, f"「{name}」を呼び出しました", sticky=False)
+                if criteria.scope.kind == "station" and isinstance(criteria.scope.value, str):
+                    self.station_id = criteria.scope.value
+                self._set_notice(
+                    NoticeLevel.INFO,
+                    f"「{name}」を呼び出しました "
+                    f"{criteria.range.start.strftime('%Y%m%d')}"
+                    f"〜{criteria.range.end.strftime('%Y%m%d')}",
+                    sticky=False,
+                )
             else:
                 self._set_notice(
                     NoticeLevel.WARNING, f"「{name}」は保存されていません", sticky=True
@@ -1061,7 +1290,7 @@ def perform_pending(screen: Screen) -> None:
         _refresh_auth(screen)
     if screen.fetch_programs:
         screen.fetch_programs = False
-        _fetch_programs(screen)
+        _start_job(screen, "fetch", screen.ensure_criteria())
     if screen.logout_request:
         screen.logout_request = False
         from radiko.storage import SessionStore
@@ -1095,50 +1324,11 @@ def perform_pending(screen: Screen) -> None:
             screen._set_notice(NoticeLevel.WARNING, "番組を選択してください", True)
         else:
             program = rows[min(screen.selected, len(rows) - 1)]
-            screen.chapter_program = program
-            try:
-                from radiko.prepare import inspect_remote_chapters
-
-                view = inspect_remote_chapters(program.key.station_id, program.key.starts_at)
-                screen.chapters = list(view.rows or [])
-                screen.chapter_index = 0
-                if not screen.chapters:
-                    screen._set_notice(NoticeLevel.WARNING, view.issue or "チャプター未提供", True)
-            except Exception as error:
-                screen._set_notice(NoticeLevel.ERROR, str(error), True)
-    if screen.play_request is None:
-        return
-    program, offset = screen.play_request
-    screen.play_request = None
-    try:
-        from radiko.auth import MemberClient
-        from radiko.prepare import play_station
-        from radiko.storage import SessionStore
-
-        store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
-        session = store.load()
-        if session is None:
-            screen._set_notice(
-                NoticeLevel.ERROR, "未ログインです。loginでログインしてください", True
-            )
-            return
-        membership = MemberClient.create().check(session)
-        report = play_station(
-            program.key.station_id,
-            screen.play_mode,
-            program.key.starts_at,
-            screen.now,
-            session,
-            membership,
-            offset,
-            None,
-            lambda: screen.quit,
-        )
-        screen.played_frames = report.frames
-        screen._set_notice(NoticeLevel.INFO, f"再生フレーム {report.frames}", False)
-    except Exception as error:
-        screen._set_notice(NoticeLevel.ERROR, str(error), True)
-    screen.revision += 1
+            _start_job(screen, "chapters", program)
+    if screen.play_request is not None:
+        program, offset = screen.play_request
+        screen.play_request = None
+        _start_job(screen, "play", (program, offset, screen.play_mode, screen.now, screen.data_dir))
 
 
 def _refresh_auth(screen: Screen) -> None:
@@ -1179,23 +1369,181 @@ def _refresh_auth(screen: Screen) -> None:
     )
 
 
-def _fetch_programs(screen: Screen) -> None:
+def _fetch_programs(criteria: SearchCriteria, cancel) -> dict:
     from radiko.catalog import CatalogClient, CatalogError
     from radiko.http_client import catalog_fetch
 
-    day = broadcast_day(screen.now)
-    screen.area_failures = []
-    screen.schedule_failures = []
-    try:
-        listed = CatalogClient(catalog_fetch).programs(screen.station_id, day)
-    except CatalogError as error:
-        screen.schedule_failures.append((screen.station_id, day.strftime("%Y%m%d"), str(error)))
-        screen._set_notice(NoticeLevel.WARNING, str(error), True)
+    def fetch(url: str) -> bytes:
+        if cancel.is_set():
+            raise CatalogError("cancelled")
+        return catalog_fetch(url)
+
+    client = CatalogClient(fetch)
+    programs: list[Program] = []
+    invalid = 0
+    area_failures: list[tuple[str, str]] = []
+    schedule_failures: list[tuple[str, str, str]] = []
+    scope = criteria.scope
+    if scope.kind == "station" and isinstance(scope.value, str):
+        stations = [scope.value]
+        areas: list[str] = []
+    elif scope.kind == "areas":
+        areas = list(scope.value or [])
+        stations = []
+    else:
+        areas = [f"JP{number}" for number in range(1, 48)]
+        stations = []
+    discovered: list[str] = []
+    for area in areas:
+        if cancel.is_set():
+            raise CatalogError("cancelled")
+        try:
+            found = client.stations(area)
+        except CatalogError as error:
+            area_failures.append((area, str(error)))
+            continue
+        for station in found:
+            if station.id not in discovered:
+                discovered.append(station.id)
+    targets = stations or discovered
+    for station in targets:
+        for day in criteria.range.days:
+            if cancel.is_set():
+                raise CatalogError("cancelled")
+            try:
+                listed = client.programs(station, day)
+            except CatalogError as error:
+                schedule_failures.append((station, day.strftime("%Y%m%d"), str(error)))
+                continue
+            programs.extend(listed.programs)
+            invalid += listed.invalid_count
+    visible = [program for program in programs if criteria.filter.matches(program)]
+    return {
+        "programs": visible,
+        "invalid": invalid,
+        "area_failures": area_failures,
+        "schedule_failures": schedule_failures,
+    }
+
+
+def _start_job(screen: Screen, kind: str, payload) -> None:
+    import queue
+    import threading
+
+    previous = screen.job_cancel
+    if previous is not None:
+        previous.set()
+    screen.job_generation += 1
+    generation = screen.job_generation
+    cancel = threading.Event()
+    box: queue.Queue = queue.Queue(1)
+    screen.job_cancel = cancel
+    screen.job_box = box
+
+    def work() -> None:
+        try:
+            if kind == "fetch":
+                result = ("fetch", _fetch_programs(payload, cancel))
+            elif kind == "chapters":
+                from radiko.prepare import inspect_remote_chapters
+
+                program = payload
+                view = inspect_remote_chapters(
+                    program.key.station_id, program.key.starts_at, cancel.is_set
+                )
+                result = ("chapters", (program, view))
+            else:
+                program, offset, mode, now, data_dir = payload
+                from radiko.auth import MemberClient
+                from radiko.prepare import play_station
+                from radiko.storage import SessionStore
+
+                store = SessionStore(data_dir) if data_dir else SessionStore.default()
+                session = store.load()
+                if session is None:
+                    raise RuntimeError("未ログインです。loginでログインしてください")
+                membership = MemberClient.create().check(session)
+                report = play_station(
+                    program.key.station_id,
+                    mode,
+                    program.key.starts_at,
+                    now,
+                    session,
+                    membership,
+                    offset,
+                    None,
+                    cancel.is_set,
+                )
+                result = ("play", report)
+            box.put((generation, result, None))
+        except Exception as error:
+            box.put((generation, None, error))
+
+    thread = threading.Thread(target=work, daemon=True)
+    screen.job_thread = thread
+    thread.start()
+
+
+def poll_jobs(screen: Screen) -> None:
+    import queue
+
+    box = screen.job_box
+    if box is None:
         return
-    screen.programs = listed.programs
-    screen.invalid_count = listed.invalid_count
-    screen.selected = min(screen.selected, max(len(screen.visible()) - 1, 0))
-    screen._set_notice(NoticeLevel.INFO, f"取得完了 {len(listed.programs)}枠", False)
+    try:
+        generation, result, error = box.get_nowait()
+    except queue.Empty:
+        return
+    if generation != screen.job_generation:
+        return
+    screen.job_box = None
+    screen.revision += 1
+    if error is not None:
+        if getattr(error, "code", None) == "cancelled":
+            return
+        screen._set_notice(NoticeLevel.ERROR, str(error), True)
+        return
+    kind, value = result
+    if kind == "fetch":
+        screen.programs = value["programs"]
+        screen.invalid_count = value["invalid"]
+        screen.area_failures = value["area_failures"]
+        screen.schedule_failures = value["schedule_failures"]
+        screen.selected = min(screen.selected, max(len(screen.visible()) - 1, 0))
+        if screen.schedule_failures or screen.area_failures:
+            screen._set_notice(NoticeLevel.WARNING, "一部の番組表を取得できませんでした", True)
+        else:
+            screen._set_notice(NoticeLevel.INFO, f"取得完了 {len(screen.programs)}枠", False)
+    elif kind == "chapters":
+        program, view = value
+        screen.chapter_program = program
+        screen.chapters = list(view.rows or [])
+        screen.chapter_summaries = list(view.summaries or [])
+        screen.chapter_index = 0
+        screen.chapter_scroll = 0
+        screen.area = "chapters"
+        if not screen.chapters:
+            screen._set_notice(NoticeLevel.WARNING, view.issue or "チャプター未提供", True)
+    elif kind == "play":
+        screen.played_frames = value.frames
+        if value.reason == "cancelled":
+            screen._set_notice(NoticeLevel.INFO, "中断しました", False)
+        else:
+            screen._set_notice(NoticeLevel.INFO, f"再生フレーム {value.frames}", False)
+
+
+def wait_jobs(screen: Screen, timeout: float = 8.0) -> None:
+    import time
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        poll_jobs(screen)
+        thread = screen.job_thread
+        if thread is None or not thread.is_alive():
+            poll_jobs(screen)
+            return
+        time.sleep(0.02)
+    poll_jobs(screen)
 
 
 def run(args: list[str], data_dir: Path | None) -> None:
@@ -1207,10 +1555,20 @@ def run(args: list[str], data_dir: Path | None) -> None:
     offline, rest = split_args(args)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError("対話端末で実行してください")
-    station = next((arg for arg in rest if not arg.startswith("-")), "TBS")
+    positional = [arg for arg in rest if not arg.startswith("-")]
+    station = positional[0] if positional else "TBS"
     screen = Screen(
         [], datetime.now().astimezone(), offline=offline, data_dir=data_dir, station_id=station
     )
+    if positional:
+        from radiko.catalog import parse_day
+
+        day = parse_day(positional[1]) if len(positional) > 1 else broadcast_day(screen.now)
+        screen.criteria = SearchCriteria.create(
+            Scope.station(positional[0]),
+            BroadcastRange.single(day),
+            Filter.create(),
+        )
     if offline:
         day = broadcast_day(screen.now)
         try:
@@ -1231,27 +1589,37 @@ def _terminal_loop(screen: Screen) -> None:
         tty.setraw(fd)
         sys.stdout.write("\x1b[?1049h\x1b[2J")
         sys.stdout.flush()
-        painted = -1
-        while not screen.quit:
-            screen.poll_device()
-            perform_pending(screen)
-            if screen.revision != painted:
-                sys.stdout.write("\x1b[H")
-                for line in screen.render():
-                    sys.stdout.write(line + "\x1b[K\n")
-                sys.stdout.flush()
-                painted = screen.revision
-            key = _read_key(0.05)
-            if key:
-                screen.handle(key)
-                screen.revision += 1
+        service_loop(screen, _read_key, _paint)
     finally:
         sys.stdout.write("\x1b[?1049l")
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, previous)
 
 
-def _read_byte(timeout: float | None) -> str | None:
+def _paint(screen: Screen) -> None:
+    sys.stdout.write("\x1b[H")
+    for line in screen.render():
+        sys.stdout.write(line + "\x1b[K\n")
+    sys.stdout.flush()
+
+
+def service_loop(screen: Screen, read_key, paint=None) -> None:
+    """キーを読みながら、取得と再生は別スレッドの世代だけを反映する。"""
+    painted = -1
+    while not screen.quit:
+        screen.poll_device()
+        perform_pending(screen)
+        poll_jobs(screen)
+        if paint is not None and screen.revision != painted:
+            paint(screen)
+            painted = screen.revision
+        key = read_key(0.05)
+        if key:
+            screen.handle(key)
+            screen.revision += 1
+
+
+def _read_raw(timeout: float | None) -> bytes | None:
     import os
     import select
 
@@ -1262,24 +1630,55 @@ def _read_byte(timeout: float | None) -> str | None:
         raw = os.read(fd, 1)
     except BlockingIOError:
         return None
-    if not raw:
-        return None
-    return raw.decode("utf-8", "ignore")
+    return raw or None
 
 
 def _read_key(timeout: float | None = None) -> str | None:
-    char = _read_byte(timeout)
+    raw = _read_raw(timeout)
+    if not raw:
+        return None
+    if raw[0] >= 0x80:
+        extra = 1 if raw[0] < 0xE0 else 2 if raw[0] < 0xF0 else 3
+        parts = bytearray(raw)
+        while len(parts) < 1 + extra:
+            more = _read_raw(0.02)
+            if not more:
+                break
+            parts.extend(more)
+        char = bytes(parts).decode("utf-8", "ignore")
+    else:
+        char = raw.decode("ascii", "ignore")
     if not char:
         return None
     if char == "\x03":
         return "ctrl-c"
+    if char == "\x15":
+        return "ctrl-u"
+    if char == "\t":
+        return "tab"
     if char == "\x1b":
-        rest = _read_byte(0.02)
-        if rest == "[":
-            code = _read_byte(0.02) or ""
-            return {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end"}.get(
-                code, "esc"
-            )
+        rest = _read_raw(0.02)
+        if rest == b"[":
+            code = ""
+            while True:
+                nxt = _read_raw(0.02)
+                if not nxt:
+                    break
+                code += nxt.decode("ascii", "ignore")
+                if code.endswith("~") or code[-1:].isalpha():
+                    break
+            if code == "12~":
+                return "f2"
+            return {
+                "A": "up",
+                "B": "down",
+                "C": "right",
+                "D": "left",
+                "H": "home",
+                "F": "end",
+            }.get(code, "esc")
+        if rest == b"O" and _read_raw(0.02) == b"Q":
+            return "f2"
         return "esc"
     if char in {"\r", "\n"}:
         return "enter"
