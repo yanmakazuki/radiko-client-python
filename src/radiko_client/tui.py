@@ -307,6 +307,9 @@ class Screen:
     fetch_chapters: bool = False
     logout_request: bool = False
     seconds_text: str = ""
+    seconds_error: str = ""
+    play_mode: str = "timefree"
+    auth_refresh: bool = False
     data_dir: Path | None = None
 
     def visible(self) -> list[Program]:
@@ -365,7 +368,7 @@ class Screen:
         elif key == "f":
             self.area = "filter"
         elif key == "b":
-            self.area = "named"
+            self._open_named()
         elif key == "?":
             self.area = "help"
         elif key == "e":
@@ -396,7 +399,9 @@ class Screen:
         elif key == "right":
             self._seek(15)
         elif key == "g":
-            self.area = "seconds"
+            self._open_seconds()
+        elif key == "l":
+            self._live()
         elif key == "c":
             if self.offline:
                 self._set_notice(NoticeLevel.INFO, OFFLINE_NOTICE, sticky=False)
@@ -412,7 +417,11 @@ class Screen:
                 self.area = "logout"
         elif key == "a":
             if self.offline:
-                self._set_notice(NoticeLevel.INFO, OFFLINE_NOTICE, sticky=False)
+                self._set_notice(
+                    NoticeLevel.INFO, "オフライン確認ではセッションを通信確認しません", sticky=False
+                )
+            else:
+                self.auth_refresh = True
         elif key == "enter":
             self._enter()
         elif key == "r":
@@ -439,8 +448,8 @@ class Screen:
             return self._framed("出力機器", self._device_body())
         if self.area == "failures":
             return self._framed("取得状況・未取得範囲", self._failures_body())
-        if self.area == "chapters":
-            return self._overlay("チャプター")
+        if self.area == "seconds":
+            return self._framed("位置指定", self._seconds_body())
         if self.area == "login":
             return self._framed("ログイン（パスワード非表示）", self._login_body())
         if self.area == "chapters":
@@ -768,27 +777,94 @@ class Screen:
         lines.append("上下・ページ・Home/End 選択 / e / q / Esc 閉じる / Ctrl+C 終了")
         return "\n".join(lines)
 
+    def _selected_program(self) -> Program | None:
+        rows = self.visible()
+        if not rows:
+            return None
+        return rows[min(self.selected, len(rows) - 1)]
+
+    def _start(self, program: Program, mode: str, offset: float = 0.0) -> None:
+        status = broadcast_status(program.key.starts_at, program.ends_at, self.now)
+        if mode == "live" and status != BroadcastStatus.ON_AIR:
+            text = (
+                "放送前のため再生できません（現在の再生を継続）"
+                if status == BroadcastStatus.UPCOMING
+                else "放送終了のためライブ再生できません（現在の再生を継続）"
+            )
+            self._set_notice(NoticeLevel.WARNING, text, sticky=True)
+            return
+        if mode == "timefree" and status == BroadcastStatus.UPCOMING:
+            self._set_notice(
+                NoticeLevel.WARNING, "放送前のため再生できません（現在の再生を継続）", sticky=True
+            )
+            return
+        if self.offline:
+            self._set_notice(NoticeLevel.INFO, "オフライン確認では再生しません", sticky=False)
+            return
+        self.playing = program
+        self.position = offset
+        self.play_mode = mode
+        self.paused = False
+        self.play_request = (program, offset)
+        self._set_notice(NoticeLevel.INFO, "再生準備中", sticky=False)
+
     def _enter(self) -> None:
         if self.area == "filter":
             self._commit_search()
             return
-        rows = self.visible()
-        if not rows:
+        program = self._selected_program()
+        if program is None:
             self._set_notice(NoticeLevel.INFO, "移動できる番組がありません", sticky=False)
             return
-        program = rows[min(self.selected, len(rows) - 1)]
-        status = broadcast_status(program.key.starts_at, program.ends_at, self.now)
-        if status == BroadcastStatus.UPCOMING:
-            self._set_notice(NoticeLevel.WARNING, "放送前のため再生できません", sticky=True)
+        self._start(program, "live" if self.live else "timefree")
+
+    def _live(self) -> None:
+        if self.offline:
+            self._set_notice(NoticeLevel.INFO, "オフライン確認では再生しません", sticky=False)
             return
-        if status == BroadcastStatus.FINISHED and not self.live:
-            self.playing = program
-            self.position = 0.0
-            self._set_notice(NoticeLevel.INFO, "再生準備中", sticky=False)
+        program = self._selected_program()
+        if program is None:
             return
-        self.playing = program
-        self.position = 0.0
-        self.paused = False
+        self._start(program, "live")
+
+    def _open_seconds(self) -> None:
+        if self.playing is None:
+            self._set_notice(NoticeLevel.INFO, "再生中の番組はありません", sticky=False)
+            return
+        if self.play_mode == "live":
+            self._set_notice(
+                NoticeLevel.WARNING, "ライブは位置指定できません（現在の再生を継続）", sticky=True
+            )
+            return
+        self.seconds_text = ""
+        self.seconds_error = ""
+        self.area = "seconds"
+
+    def _seconds_body(self) -> str:
+        if self.playing is None:
+            return "再生中の番組はありません"
+        total = int((self.playing.ends_at - self.playing.key.starts_at).total_seconds())
+        return (
+            f"位置指定: {self.playing.key.station_id} / 枠内の秒数（0以上{total}未満）: "
+            f"{self.seconds_text}\nEnter 確定 / Esc 取消 / Ctrl+U 消去 / {self.seconds_error}"
+        )
+
+    def _open_named(self) -> None:
+        if self.offline:
+            self._set_notice(
+                NoticeLevel.INFO, "オフライン確認では保存条件を読み書きしません", sticky=False
+            )
+            return
+        from radiko.storage import SearchStore, default_data_dir
+
+        store = SearchStore(self.data_dir or default_data_dir())
+        try:
+            library = store.load()
+        except Exception as error:
+            self._set_notice(NoticeLevel.ERROR, f"保存条件の操作失敗: {error}", True)
+            return
+        self.named = dict(library.named)
+        self.area = "named"
 
     def _on_air(self) -> None:
         rows = self.visible()
@@ -872,6 +948,10 @@ class Screen:
                 criteria = self.named[name]
                 self.committed = criteria.filter
                 self._set_notice(NoticeLevel.INFO, f"「{name}」を呼び出しました", sticky=False)
+            else:
+                self._set_notice(
+                    NoticeLevel.WARNING, f"「{name}」は保存されていません", sticky=True
+                )
             self.area = "list"
             return
         self.draft_name.handle(key)
@@ -891,11 +971,35 @@ class Screen:
         if key == "esc":
             self.area = "list"
             return
+        if key == "ctrl-u":
+            self.seconds_text = ""
+            self.seconds_error = ""
+            return
+        if key == "backspace":
+            self.seconds_text = self.seconds_text[:-1]
+            self.seconds_error = ""
+            return
         if key == "enter":
+            if self.playing is None:
+                self.area = "list"
+                return
+            total = (self.playing.ends_at - self.playing.key.starts_at).total_seconds()
+            try:
+                value = int(self.seconds_text)
+            except ValueError:
+                value = -1
+            if not 0 <= value < total:
+                self.seconds_error = "放送枠内の整数秒を入力してください"
+                return
+            self.position = float(value)
+            self.play_mode = "timefree"
+            self.play_request = (self.playing, float(value))
             self.area = "list"
+            self._set_notice(NoticeLevel.INFO, f"{value}秒から再生します", sticky=False)
             return
-        if key.isdigit():
-            return
+        if key.isdigit() and len(self.seconds_text) < 20:
+            self.seconds_text += key
+            self.seconds_error = ""
 
     def _esc(self) -> None:
         if self.output_guide:
@@ -952,6 +1056,9 @@ def perform_pending(screen: Screen) -> None:
         screen.play_request = None
         screen.logout_request = False
         return
+    if screen.auth_refresh:
+        screen.auth_refresh = False
+        _refresh_auth(screen)
     if screen.fetch_programs:
         screen.fetch_programs = False
         _fetch_programs(screen)
@@ -1018,7 +1125,7 @@ def perform_pending(screen: Screen) -> None:
         membership = MemberClient.create().check(session)
         report = play_station(
             program.key.station_id,
-            "live" if screen.live else "timefree",
+            screen.play_mode,
             program.key.starts_at,
             screen.now,
             session,
@@ -1032,6 +1139,44 @@ def perform_pending(screen: Screen) -> None:
     except Exception as error:
         screen._set_notice(NoticeLevel.ERROR, str(error), True)
     screen.revision += 1
+
+
+def _refresh_auth(screen: Screen) -> None:
+    from radiko.auth import AuthError, MemberClient
+    from radiko.storage import SessionStore
+
+    store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
+    try:
+        session = store.load()
+    except Exception as error:
+        screen.auth = "signed-out"
+        screen._set_notice(NoticeLevel.ERROR, str(error), True)
+        return
+    if session is None:
+        screen.auth = "signed-out"
+        screen._set_notice(NoticeLevel.INFO, "未ログインです。loginでログインしてください", False)
+        return
+    try:
+        membership = MemberClient.create().check(session)
+    except AuthError as error:
+        screen.auth = "signed-out"
+        screen._set_notice(NoticeLevel.ERROR, str(error), True)
+        return
+    screen.auth = "signed-in"
+
+    def label(value: bool | None) -> str:
+        if value is True:
+            return "あり"
+        if value is False:
+            return "なし"
+        return "未確認"
+
+    screen._set_notice(
+        NoticeLevel.INFO,
+        f"ログイン有効 / エリアフリー: {label(membership.area_free)} / "
+        f"タイムフリー30: {label(membership.time_free_30)}",
+        False,
+    )
 
 
 def _fetch_programs(screen: Screen) -> None:
