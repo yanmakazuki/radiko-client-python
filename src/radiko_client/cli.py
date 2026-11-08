@@ -781,9 +781,34 @@ def play(args: list[str], data_dir: Path | None) -> None:
     now = datetime.now(timezone.utc)
     mode, station, cursor, seconds, offset, interactive = _play_request(args, now)
     session = _require_session(data_dir)
-    if interactive and not sys.stdin.isatty():
-        interactive = False
     import threading
+
+    commands = None
+    if interactive and sys.stdin.isatty():
+        import queue
+
+        box: queue.Queue[str] = queue.Queue(4)
+
+        def reader() -> None:
+            for line in sys.stdin:
+                if stop.is_set():
+                    return
+                try:
+                    box.put_nowait(line)
+                except queue.Full:
+                    pass
+
+        threading.Thread(target=reader, daemon=True).start()
+        stderr_ln(
+            "操作: live 局ID / timefree 局ID YYYYMMDDHHmmss [--offset 秒数] / status / pause / "
+            "resume / volume 0〜100 / seek 秒数 / +15 / -15 / q（Enterで確定）"
+        )
+
+        def commands() -> str | None:
+            try:
+                return box.get_nowait()
+            except queue.Empty:
+                return None
 
     stop = threading.Event()
     membership = _membership(session, stop)
@@ -804,6 +829,7 @@ def play(args: list[str], data_dir: Path | None) -> None:
         offset,
         None if seconds is None else float(seconds),
         stop.is_set,
+        commands,
     )
     start = report.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     end = report.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
@@ -815,6 +841,8 @@ def play(args: list[str], data_dir: Path | None) -> None:
         "limit": "指定時間で停止しました",
         "cancelled": "中断しました",
     }[report.reason]
+    for message in report.messages or []:
+        stderr_ln(message)
     stdout_ln(reason)
     if report.reason != "cancelled":
         stdout_ln(

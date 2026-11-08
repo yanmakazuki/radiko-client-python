@@ -93,6 +93,7 @@ class PlayReport:
     mode: str
     starts_at: datetime
     ends_at: datetime
+    messages: list[str] | None = None
 
 
 class ChapterFailure(Exception):
@@ -671,6 +672,9 @@ def play_station(
     position: float,
     limit: float | None,
     cancelled,
+    commands=None,
+    reconnect_sleep=None,
+    reauth_now=None,
 ) -> PlayReport:
     from radiko.output import play_samples
     from radiko.stream import ProbeError
@@ -684,7 +688,15 @@ def play_station(
     from radiko.fragmented import FragmentedAacDecoder
     from radiko.reauth import ReauthState
 
-    reauth = ReauthState(session, cancelled)
+    reauth = ReauthState(session, cancelled, now=reauth_now)
+    from radiko.interactive import InteractiveControl
+    from radiko.timing import ReconnectBudget, accept_fragment, segment_wall
+
+    duration = (program.end - program.start).total_seconds()
+    control = InteractiveControl(duration, mode, station)
+    budget = ReconnectBudget(cancelled, sleep=reconnect_sleep)
+    pending_commands = list(commands or [])
+    stamp = None
     samples: list[float] = []
     rate = 48000
     channels = 2
@@ -696,7 +708,17 @@ def play_station(
     init_uri = None
     sequence = media.media_sequence
     while True:
-        if cancelled():
+        if cancelled() or control.stopped:
+            reason = "cancelled"
+            break
+        line = (
+            commands()
+            if callable(commands)
+            else (pending_commands.pop(0) if pending_commands else None)
+        )
+        if line:
+            control.handle(line)
+        if control.stopped:
             reason = "cancelled"
             break
         if sequence >= media.media_sequence + len(media.segments):
@@ -743,6 +765,15 @@ def play_station(
             ):
                 reason = "cancelled"
                 break
+            if budget.can_retry(error, taken > 0):
+                try:
+                    budget.wait()
+                except ProbeError as waited:
+                    if waited.code == "cancelled":
+                        reason = "cancelled"
+                        break
+                    raise
+                continue
             raise
         reauth.episode = False
         if fragment_decoder is not None and (
@@ -753,6 +784,14 @@ def play_station(
             rate = decoded.sample_rate
             channels = decoded.channels
             frame_count = decoded.frames
+            stamp = accept_fragment(
+                segment.duration,
+                frame_count / rate,
+                decoded.decode_time,
+                decoded.timescale,
+                segment_wall(media, sequence),
+                stamp,
+            )
         else:
             pcm = decoder.decode_segment_pcm(payload, None, cancelled)
             piece = pcm.samples
@@ -782,8 +821,8 @@ def play_station(
     if cancelled():
         reason = "cancelled"
     summary = None
-    if samples and reason != "cancelled":
-        summary = play_samples(samples, rate, channels, volume=100)
+    if samples and reason != "cancelled" and not control.paused:
+        summary = play_samples(samples, rate, channels, volume=control.volume)
     return PlayReport(
         reason,
         0 if summary is None else summary.frames,
@@ -796,6 +835,7 @@ def play_station(
         "Live" if mode == "live" else "TimeFree",
         program.start,
         program.end,
+        control.messages,
     )
 
 

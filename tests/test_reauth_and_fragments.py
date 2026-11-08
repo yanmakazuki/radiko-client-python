@@ -22,6 +22,7 @@ FRAGMENTS = [
     synthetic_fragment(PACKETS, 0, 1),
     synthetic_fragment(PACKETS, 1024 * len(PACKETS), 2),
 ]
+FRAGMENT_SECONDS = len(PACKETS) * 1024 / 44100
 ADTS = encode_adts_sine(packets=3)
 STATIONS = open("tests/fixtures/stations.xml", "rb").read()
 STREAMS = open("tests/fixtures/streams.xml", "rb").read()
@@ -96,7 +97,11 @@ class _Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/v3/station/stream/pc_html5/TBS.xml":
             body = STREAMS
         elif parsed.path.endswith("/master.m3u8"):
-            media = "/frag/media.m3u8" if state.mode == "fragments" else "/auth/media.m3u8"
+            media = (
+                "/frag/media.m3u8"
+                if state.mode in {"fragments", "skew"}
+                else ("/out/media.m3u8" if state.mode == "outage" else "/auth/media.m3u8")
+            )
             body = (
                 "#EXTM3U\n"
                 '#EXT-X-STREAM-INF:BANDWIDTH=48000,CODECS="mp4a.40.2",AUDIO="main"\n'
@@ -104,11 +109,30 @@ class _Handler(BaseHTTPRequestHandler):
                 f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="main",NAME="main",DEFAULT=YES,URI="{media}"\n'
             ).encode()
         elif parsed.path == "/frag/media.m3u8":
+            gap = "2026-10-15T12:00:10+09:00" if state.mode == "skew" else ""
+            second_date = f"#EXT-X-PROGRAM-DATE-TIME:{gap}\n" if gap else ""
             body = (
                 "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:1\n"
                 '#EXT-X-MAP:URI="/frag/init.mp4"\n'
-                "#EXTINF:1.0,\n/frag/1.m4s\n#EXTINF:1.0,\n/frag/2.m4s\n#EXT-X-ENDLIST\n"
+                "#EXT-X-PROGRAM-DATE-TIME:2026-10-15T12:00:00+09:00\n"
+                f"#EXTINF:{FRAGMENT_SECONDS:.6f},\n/frag/1.m4s\n"
+                f"{second_date}#EXTINF:{FRAGMENT_SECONDS:.6f},\n/frag/2.m4s\n"
+                "#EXT-X-ENDLIST\n"
             ).encode()
+        elif parsed.path == "/out/media.m3u8":
+            body = (
+                b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:1\n"
+                b"#EXTINF:1.0,\n/out/a.aac\n#EXTINF:1.0,\n/out/b.aac\n#EXT-X-ENDLIST\n"
+            )
+        elif parsed.path == "/out/a.aac":
+            body = ADTS
+        elif parsed.path == "/out/b.aac":
+            state.failures = getattr(state, "failures", 0) + 1
+            if state.failures <= 2:
+                self.send_response(500)
+                self.end_headers()
+                return
+            body = ADTS
         elif parsed.path == "/frag/init.mp4":
             body = INIT
         elif parsed.path == "/frag/1.m4s":
@@ -184,6 +208,55 @@ def _env(monkeypatch, server, data):
 
 def _yesterday() -> str:
     return (datetime.now(JST) - timedelta(days=1)).strftime("%Y%m%d120000")
+
+
+def test_program_date_skew_rejects_the_fragment(tmp_path, monkeypatch, capsys):
+    server, _state = _serve("skew")
+    _env(monkeypatch, server, tmp_path)
+    try:
+        code = main(
+            ["--data-dir", str(tmp_path), "play-timefree", "TBS", _yesterday(), "--seconds", "30"]
+        )
+    finally:
+        server.shutdown()
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert "コンテナ" in err
+    assert "番組終了" not in out
+
+
+def test_outage_retries_on_a_virtual_clock_then_plays(tmp_path, monkeypatch, capsys):
+    server, state = _serve("outage")
+    _env(monkeypatch, server, tmp_path)
+    slept: list[float] = []
+
+    def virtual_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    from radiko.auth import MemberClient
+    from radiko.prepare import play_station
+
+    session = MemberSession("synthetic-token")
+    membership = MemberClient.create().check(session)
+    when = datetime.strptime(_yesterday(), "%Y%m%d%H%M%S").replace(tzinfo=JST)
+    try:
+        report = play_station(
+            "TBS",
+            "timefree",
+            when,
+            datetime.now(UTC),
+            session,
+            membership,
+            0.0,
+            30.0,
+            lambda: False,
+            reconnect_sleep=virtual_sleep,
+        )
+    finally:
+        server.shutdown()
+    assert report.reason == "program-end", report
+    assert abs(sum(slept) - 3.0) < 1e-4
+    assert state.failures == 3
 
 
 def test_two_fragments_play_through_the_real_boxes(tmp_path, monkeypatch, capsys):
