@@ -10,6 +10,7 @@ import ctypes
 import ctypes.util
 import sys
 import threading
+import time
 from array import array
 
 from radiko.output import OutputError, OutputInfo, OutputSummary
@@ -119,6 +120,8 @@ def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop)
     frames = len(samples) // channels
     raw = array("f", samples)
     started = False
+    started_at = None
+    played_frames = frames
     try:
         size = len(raw) * raw.itemsize
         buffer_ref = ctypes.POINTER(QueueBuffer)()
@@ -135,8 +138,11 @@ def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop)
         if status != 0:
             raise OutputError("device")
         started = True
+        started_at = time.monotonic()
         while not done.wait(0.01):
             if stop.is_set():
+                elapsed = time.monotonic() - started_at
+                played_frames = min(frames, max(0, int(elapsed * rate)))
                 break
             if _drained(lib, queue):
                 break
@@ -144,7 +150,7 @@ def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop)
         if started:
             lib.AudioQueueStop(queue, True)
         _dispose(handle)
-    return OutputSummary(frames, rate, channels, "f32", 0)
+    return OutputSummary(played_frames, rate, channels, "f32", 0)
 
 
 def _drained(lib, queue) -> bool:
