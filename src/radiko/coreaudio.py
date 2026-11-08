@@ -76,7 +76,7 @@ def play(samples: list[float], rate: int, channels: int, info: OutputInfo, stop)
     handle = _open(rate, info.channels or channels)
     if handle is None:
         raise OutputError("none")
-    lib, queue = handle
+    lib, queue, _callback = handle
     done = threading.Event()
     frames = len(samples) // channels
     raw = array("f", samples)
@@ -131,13 +131,21 @@ def _open(rate: int, channels: int, lib=None):
         ctypes.byref(queue),
     )
     if status != 0 or not queue.value:
+        _forget(callback)
         return None
-    return lib, queue
+    return lib, queue, callback
+
+
+def _forget(callback) -> None:
+    if callback in _callbacks:
+        _callbacks.remove(callback)
 
 
 def _dispose(handle) -> None:
-    lib, queue = handle
+    lib, queue = handle[0], handle[1]
     lib.AudioQueueDispose(queue, True)
+    if len(handle) > 2:
+        _forget(handle[2])
 
 
 def _description(rate: int, channels: int) -> StreamDescription:

@@ -53,6 +53,31 @@ def segment_wall(media, sequence: int) -> datetime | None:
     return None
 
 
+def trim_pcm(
+    samples: list[float],
+    channels: int,
+    rate: int,
+    start: datetime | None,
+    target: datetime | None,
+) -> tuple[list[float], int] | None:
+    """番組時刻から目標までを切り捨てる。セグメント全体より先なら None。
+
+    捨てるフレーム数はナノ秒×サンプルレートを切り上げる。Rust の `trim_to` と同じ式。
+    """
+    if start is None or target is None or channels <= 0 or rate <= 0:
+        raise ProbeError("playlist")
+    delta = (target - start).total_seconds()
+    if delta < 0:
+        raise ProbeError("playlist")
+    nanos = int(round(delta * 1_000_000_000))
+    skip = (nanos * rate + 1_000_000_000 - 1) // 1_000_000_000
+    frames = len(samples) // channels
+    if skip >= frames:
+        return None
+    kept = samples[skip * channels :]
+    return kept, frames - skip
+
+
 def _microseconds(value: float) -> int:
     return int(round(value * 1_000_000))
 

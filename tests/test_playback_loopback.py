@@ -77,6 +77,23 @@ class _Handler(BaseHTTPRequestHandler):
     fail_auth = False
     cancel_on_segment = False
     stop: threading.Event | None = None
+    origin_stamp: str | None = None
+    login_body = b""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        _Handler.paths.append(urlsplit(self.path).path)
+        if urlsplit(self.path).path == "/ap/member/webapi/member/login":
+            _Handler.login_body = body
+            payload = b'{"radiko_session":"login-token"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        self.send_response(404)
+        self.end_headers()
 
     def do_GET(self):
         parsed = urlsplit(self.path)
@@ -112,7 +129,14 @@ class _Handler(BaseHTTPRequestHandler):
         elif parsed.path.endswith("/master.m3u8"):
             body = MASTER
         elif parsed.path == "/media.m3u8":
-            body = MEDIA
+            if _Handler.origin_stamp:
+                body = (
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n"
+                    f"#EXT-X-PROGRAM-DATE-TIME:{_Handler.origin_stamp}\n"
+                    "#EXTINF:1.5,\n/seg.aac\n#EXT-X-ENDLIST\n"
+                ).encode()
+            else:
+                body = MEDIA
         elif parsed.path == "/seg.aac":
             body = ADTS
         elif parsed.path == "/v1/programs/SYNTHETIC-2/chapters":
@@ -135,6 +159,8 @@ def _serve():
     _Handler.fail_auth = False
     _Handler.cancel_on_segment = False
     _Handler.stop = None
+    _Handler.origin_stamp = None
+    _Handler.login_body = b""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -293,3 +319,40 @@ def test_segment_cancel_stops_before_claiming_playback(tmp_path, monkeypatch, ca
     assert report.reason == "cancelled"
     assert report.frames == 0
     assert "synthetic-token" not in repr(report)
+
+
+def test_tui_login_and_chapter_play_trim_the_segment(tmp_path, monkeypatch):
+    """チャプターの秒位置はプレイリストの番組時刻から PCM を切り詰める。"""
+    from radiko.domain import Program, ProgramKey
+    from radiko_client.tui import Screen, perform_pending
+
+    server = _serve()
+    _env(monkeypatch, server, tmp_path)
+    start = (datetime.now(JST) - timedelta(days=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
+    program = Program(ProgramKey("TBS", start), "slot", start + timedelta(hours=1), "対話番組")
+    _Handler.origin_stamp = (start - timedelta(minutes=30)).isoformat()
+    screen = Screen([program], datetime.now(UTC), offline=False, data_dir=tmp_path)
+    screen.handle("c")
+    try:
+        perform_pending(screen)
+        assert screen.chapters[0][0] == 10.0
+        assert screen.chapters[0][2] == "本題"
+        screen.area = "chapters"
+        screen.handle("enter")
+        assert screen.play_request == (program, 10.0)
+        screen.play_request = None
+        screen.chapters = [(0.4, 1.0, "途中")]
+        screen.chapter_index = 0
+        screen.handle("enter")
+        perform_pending(screen)
+        trimmed = screen.played_frames
+        screen.chapters = [(0.0, 1.0, "先頭")]
+        screen.handle("enter")
+        perform_pending(screen)
+        whole = screen.played_frames
+    finally:
+        server.shutdown()
+    assert whole > trimmed > 0
+    assert "synthetic-token" not in repr(screen.chapters)

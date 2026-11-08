@@ -52,6 +52,22 @@ def _program(when: datetime) -> bytes:
 
 
 class _Handler(BaseHTTPRequestHandler):
+    login_body = b""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        if urlsplit(self.path).path == "/ap/member/webapi/member/login":
+            _Handler.login_body = body
+            payload = b'{"radiko_session":"login-token"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_GET(self):
         parsed = urlsplit(self.path)
         if parsed.path == "/ap/member/webapi/v2/member/login/check":
@@ -105,6 +121,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _serve():
+    _Handler.login_body = b""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -228,3 +245,64 @@ def test_tui_pty_restores_the_terminal_after_quit(tmp_path):
     assert process.returncode == 0, text
     assert "オフライン" in text
     assert after == before
+
+
+def test_tui_pty_login_never_prints_the_password(tmp_path):
+    server = _serve()
+    origin = f"http://127.0.0.1:{server.server_port}"
+    env = os.environ.copy()
+    env.update(
+        {
+            "RADIKO_AUTH_ORIGIN": origin,
+            "RADIKO_LOOPBACK_ORIGIN": origin,
+            "PYTHONPATH": "src",
+            "TERM": "xterm",
+        }
+    )
+    master, slave = pty.openpty()
+    before = termios.tcgetattr(slave)
+    process = subprocess.Popen(
+        [sys.executable, "-m", "radiko_client", "--data-dir", str(tmp_path), "tui"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        start_new_session=True,
+    )
+    collected = b""
+    sent = False
+    deadline = time.monotonic() + 15
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if ready:
+                try:
+                    collected += os.read(master, 4096)
+                except OSError:
+                    break
+            if not sent and collected:
+                os.write(master, b"Iuser@example.invalid\rSYNTHETIC_PASSWORD_99\rq")
+                sent = True
+            if process.poll() is not None and not ready:
+                break
+        else:
+            process.kill()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        after = termios.tcgetattr(slave)
+        os.close(slave)
+        os.close(master)
+        server.shutdown()
+    text = collected.decode(errors="replace")
+    assert process.returncode == 0, text
+    assert "入力済み（非表示）" in text
+    assert "ログインし、セッションを保存しました" in text
+    assert "SYNTHETIC_PASSWORD_99" not in text
+    assert b"mail=user%40example.invalid" in _Handler.login_body
+    assert b"pass=SYNTHETIC_PASSWORD_99" in _Handler.login_body
+    assert after == before
+    saved = (tmp_path / "session.json").read_text()
+    assert "login-token" in saved
+    assert "SYNTHETIC_PASSWORD_99" not in saved

@@ -280,6 +280,19 @@ class Screen:
     quit: bool = False
     no_color: bool = False
     clock: float = 0.0
+    mail: str = ""
+    password: str = ""
+    password_focus: bool = False
+    login_request: tuple[str, str] | None = None
+    chapters: list[tuple[float, float, str]] = field(default_factory=list)
+    chapter_index: int = 0
+    chapter_program: Program | None = None
+    play_request: tuple[Program, float] | None = None
+    played_frames: int = 0
+    fetch_chapters: bool = False
+    logout_request: bool = False
+    seconds_text: str = ""
+    data_dir: Path | None = None
 
     def visible(self) -> list[Program]:
         return [program for program in self.programs if self.committed.matches(program)]
@@ -290,6 +303,12 @@ class Screen:
         if key == "ctrl-c":
             self.quit = True
             return
+        if self.area == "login":
+            self._login_key(key)
+            return
+        if self.area == "chapters":
+            self._chapters(key)
+            return
         if self.area == "keyword":
             self._keyword(key)
             return
@@ -299,7 +318,7 @@ class Screen:
         if self.area == "logout":
             self._logout(key)
             return
-        if self.area in {"help", "device", "failures", "chapters"}:
+        if self.area in {"help", "device", "failures"}:
             if key in {"q", "esc"} or (self.area == "device" and key == "d"):
                 self.area = "list"
             return
@@ -364,7 +383,11 @@ class Screen:
         elif key == "g":
             self.area = "seconds"
         elif key == "c":
-            self.area = "chapters"
+            if self.offline:
+                self._set_notice(NoticeLevel.INFO, OFFLINE_NOTICE, sticky=False)
+            else:
+                self.fetch_chapters = True
+                self.area = "chapters"
         elif key == "I":
             self.area = "login" if not self.offline else "list"
             if self.offline:
@@ -404,29 +427,22 @@ class Screen:
         if self.area == "chapters":
             return self._overlay("チャプター")
         if self.area == "login":
-            return self._overlay("ログイン")
+            return self._framed("ログイン（パスワード非表示）", self._login_body())
+        if self.area == "chapters":
+            return self._framed("チャプター", self._chapter_body())
         if self.area == "logout":
             return self._overlay("ログアウトしますか（y で確定）")
         compact = self.height <= COMPACT_HEIGHT
-        header = 2 if compact else 3
-        notice = self.notice.text if self.notice else ""
-        notice_lines = wrap_display(notice, max(self.width - 2, 1)) if notice else [""]
-        footer_body = max(len(notice_lines), 1) + 2
-        body_height = max(self.height - header - footer_body, 1)
         rows = self.visible()
-        lines = []
-        title = "ライブ" if self.live else "タイムフリー"
-        lines.append(
-            truncate_width(f"{title}  {OFFLINE_NOTICE if self.offline else '番組一覧'}", self.width)
+        lines = self._header(compact, rows)
+        title = (
+            "番組一覧"
+            if compact
+            else self.keyword_preview() or f"番組一覧 一致{len(rows)} / 取得{len(self.programs)}枠"
         )
-        if not compact:
-            lines.append(
-                truncate_width(
-                    self.keyword_preview()
-                    or f"番組一覧 一致{len(rows)} / 取得{len(self.programs)}枠",
-                    self.width,
-                )
-            )
+        lines.append(truncate_width(title, self.width))
+        footer = self._footer(compact)
+        body_height = max(self.height - len(lines) - len(footer), 0)
         for index in range(body_height):
             if index >= len(rows):
                 lines.append("")
@@ -438,35 +454,10 @@ class Screen:
             ]
             label = f"{mark} {program.title} [{status}]"
             lines.append(truncate_width(label, self.width))
-        state = "一時停止" if self.paused else "再生中" if self.playing else "停止"
-        clock = ""
-        if self.playing:
-            total = (self.playing.ends_at - self.playing.key.starts_at).total_seconds()
-            clock = f"{_clock(self.position)} / {_clock(total)}"
-        identity = self.playing.title if self.playing else "停止中"
-        if self.stop_cause == "auth" and self.auth == "signed-out":
-            identity = "停止中：認証期限切れ（I で再ログイン）"
-        elif self.stop_cause == "auth":
-            identity = "停止中：認証期限切れ（a で再確認）"
-        elif self.stop_cause == "reconnect":
-            identity = "停止中：再接続できませんでした（番組を選び直してください）"
-        lines.append(
-            truncate_width(
-                playback_line(identity, state if self.playing else "", clock, self.width),
-                self.width,
-            )
-        )
-        prefix = (
-            {"error": "✕ ", "warning": "! ", "info": ""}[self.notice.level]
-            if self.notice and not self.no_color
-            else ""
-        )
-        if self.no_color:
-            prefix = ""
-        shown = prefix + (notice_lines[0] if notice else "")
-        lines.append(truncate_width(shown, self.width))
-        lines.append(truncate_width(hint(self.width), self.width))
-        return lines[: self.height]
+        lines.extend(footer)
+        lines = lines[: self.height]
+        lines.extend("" for _ in range(self.height - len(lines)))
+        return lines
 
     def cells(self) -> list[list[str]]:
         """幅と高さに揃えたセル。全角は2列、2列目は空にする。書記素は分けない。"""
@@ -492,6 +483,163 @@ class Screen:
         shown = [truncate_width(line, self.width) for line in lines[: self.height]]
         shown.extend("" for _ in range(self.height - len(shown)))
         return shown
+
+    def _scope(self) -> str:
+        rows = self.visible()
+        if not rows:
+            return "指定なし"
+        return rows[0].key.station_id
+
+    def _mode_label(self) -> str:
+        mode = "ライブ（放送中のみ）" if self.live else "タイムフリー"
+        if self.offline:
+            return f"{mode} / オフライン確認"
+        return mode
+
+    def _header(self, compact: bool, _rows: list[Program]) -> list[str]:
+        scope = self._scope()
+        day = broadcast_day(self.now)
+        if compact:
+            return [
+                truncate_width(f"{self._mode_label()} / {scope} / {day}〜{day}", self.width),
+                truncate_width(OFFLINE_NOTICE if self.offline else self.auth, self.width),
+            ]
+        lines = [
+            "┌ radiko-client",
+            f"│ {self._mode_label()} / {scope} / {day}〜{day}（日本時間・05:00区切り）",
+            "│ キーワード: 指定なし",
+            "│ 番組ジャンル: 指定なし / 出演者分類: 指定なし",
+            f"│ 認証: {self.auth}",
+            "│ " + (OFFLINE_NOTICE if self.offline else ""),
+            "└",
+        ]
+        return [truncate_width(line, self.width) for line in lines]
+
+    def _footer(self, compact: bool) -> list[str]:
+        if self.playing:
+            mode = "ライブ" if self.live else "タイムフリー"
+            state = "一時停止" if self.paused else "再生中"
+            total = (self.playing.ends_at - self.playing.key.starts_at).total_seconds()
+            clock = f"{_clock(self.position)} / {_clock(total)}"
+            identity = f"再生中: [{self.playing.key.station_id} / {mode}]"
+            play = playback_line(identity, state, clock, self.width)
+            if (
+                not compact
+                and display_width(play) + display_width(f" / 音量{self.volume}%") <= self.width
+            ):
+                play = f"{play} / 音量{self.volume}%"
+        else:
+            play = "再生中: なし" if compact else f"再生中: なし / 音量{self.volume}%"
+        notice = ""
+        if self.notice:
+            mark = (
+                ""
+                if self.no_color
+                else {"error": "✕ ", "warning": "! ", "info": ""}[self.notice.level]
+            )
+            notice = mark + self.notice.text
+        controls = hint(self.width) if compact else "e 取得状況 / ? 操作一覧 / Enter 再生 / q 終了"
+        return [
+            truncate_width(play, self.width),
+            truncate_width(notice, self.width),
+            truncate_width(controls, self.width),
+        ]
+
+    def notice_color(self) -> str | None:
+        if self.no_color or self.notice is None or self.notice.level == NoticeLevel.INFO:
+            return None
+        return "red" if self.notice.level == NoticeLevel.ERROR else "yellow"
+
+    def _login_body(self) -> str:
+        hidden = "未入力" if self.password == "" else "入力済み（非表示）"
+        mail_mark = " " if self.password_focus else ">"
+        password_mark = ">" if self.password_focus else " "
+        return f"{mail_mark} メールアドレス: {self.mail}\n{password_mark} パスワード: {hidden}"
+
+    def _chapter_body(self) -> str:
+        if not self.chapters:
+            return "チャプター未提供"
+        lines = []
+        for index, (begin, finish, title) in enumerate(self.chapters):
+            mark = ">" if index == self.chapter_index else " "
+            lines.append(f"{mark} {begin:.3f}–{finish:.3f}秒 {title}")
+        return "\n".join(lines)
+
+    def _framed(self, title: str, body: str) -> list[str]:
+        lines = [truncate_width(f"┌ {title}", self.width)]
+        for paragraph in body.splitlines() or [""]:
+            wrapped = wrap_display(paragraph, max(self.width - 2, 1))
+            lines.extend(truncate_width(f"│ {line}", self.width) for line in wrapped)
+        lines.append(truncate_width("└", self.width))
+        lines = lines[: self.height]
+        lines.extend("" for _ in range(self.height - len(lines)))
+        return lines
+
+    def _login_key(self, key: str) -> None:
+        if key == "esc":
+            self.password = ""
+            self.area = "list"
+            return
+        if key == "tab":
+            self.password_focus = not self.password_focus
+            return
+        if key == "enter" and not self.password_focus:
+            self.password_focus = True
+            return
+        if key == "enter":
+            if not self.mail.strip() or self.password == "":
+                self._set_notice(
+                    NoticeLevel.ERROR, "メールアドレスとパスワードを入力してください", True
+                )
+                return
+            self.login_request = (self.mail, self.password)
+            self.password = ""
+            self.mail = ""
+            self.area = "list"
+            return
+        if key == "backspace":
+            if self.password_focus:
+                self.password = self.password[:-1]
+            else:
+                self.mail = self.mail[:-1]
+            return
+        if key == "ctrl-u":
+            if self.password_focus:
+                self.password = ""
+            else:
+                self.mail = ""
+            return
+        if len(key) == 1 and key.isprintable() and not self.offline:
+            limit = 4096 if self.password_focus else 1024
+            current = self.password if self.password_focus else self.mail
+            if len(current.encode()) + len(key.encode()) <= limit:
+                if self.password_focus:
+                    self.password += key
+                else:
+                    self.mail += key
+
+    def _chapters(self, key: str) -> None:
+        if key in {"q", "esc"}:
+            self.area = "list"
+            return
+        if key in {"j", "down"} and self.chapters:
+            self.chapter_index = min(self.chapter_index + 1, len(self.chapters) - 1)
+            return
+        if key in {"k", "up"}:
+            self.chapter_index = max(self.chapter_index - 1, 0)
+            return
+        if key == "r" and not self.offline:
+            self.fetch_chapters = True
+            return
+        if key != "enter" or not self.chapters or self.chapter_program is None:
+            if key == "enter":
+                self._set_notice(NoticeLevel.WARNING, "再生できるチャプターがありません", True)
+            return
+        begin, _finish, title = self.chapters[self.chapter_index]
+        self.position = begin
+        self.playing = self.chapter_program
+        self.play_request = (self.chapter_program, begin)
+        self._set_notice(NoticeLevel.INFO, f"{title} から再生します", False)
 
     def publish(self, generation: int, programs: list[Program]) -> bool:
         if generation != self.generation:
@@ -616,9 +764,11 @@ class Screen:
 
     def _logout(self, key: str) -> None:
         if key == "y":
-            self.auth = "signed-out"
             self.area = "list"
-            self._set_notice(NoticeLevel.INFO, "ログアウトしました", sticky=False)
+            if self.offline:
+                self._set_notice(NoticeLevel.INFO, "オフライン確認ではログアウトしません", False)
+                return
+            self.logout_request = True
             return
         if key in {"n", "esc", "q"}:
             self.area = "list"
@@ -680,6 +830,92 @@ class Screen:
         return max(self.height - 6, 1)
 
 
+def perform_pending(screen: Screen) -> None:
+    """ログインとチャプター取得と再生。描画の外で、保存済みセッションを使う。"""
+    if screen.offline:
+        screen.login_request = None
+        screen.fetch_chapters = False
+        screen.play_request = None
+        screen.logout_request = False
+        return
+    if screen.logout_request:
+        screen.logout_request = False
+        from radiko.storage import SessionStore
+
+        store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
+        store.delete()
+        screen.auth = "signed-out"
+        screen._set_notice(NoticeLevel.INFO, "ローカルのセッションを削除しました", False)
+    if screen.login_request is not None:
+        mail, password = screen.login_request
+        screen.login_request = None
+        screen.password = ""
+        try:
+            from radiko.auth import MemberClient
+            from radiko.storage import SessionStore
+
+            session, _membership = MemberClient.create().login(mail, password)
+            store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
+            store.save(session)
+            screen.auth = "signed-in"
+            screen._set_notice(NoticeLevel.INFO, "ログインし、セッションを保存しました", False)
+        except Exception as error:
+            message = str(error).replace(password, "■") if password else str(error)
+            screen._set_notice(NoticeLevel.ERROR, message, True)
+        finally:
+            password = ""
+    if screen.fetch_chapters:
+        screen.fetch_chapters = False
+        rows = screen.visible()
+        if not rows:
+            screen._set_notice(NoticeLevel.WARNING, "番組を選択してください", True)
+        else:
+            program = rows[min(screen.selected, len(rows) - 1)]
+            screen.chapter_program = program
+            try:
+                from radiko.prepare import inspect_remote_chapters
+
+                view = inspect_remote_chapters(program.key.station_id, program.key.starts_at)
+                screen.chapters = list(view.rows or [])
+                screen.chapter_index = 0
+                if not screen.chapters:
+                    screen._set_notice(NoticeLevel.WARNING, view.issue or "チャプター未提供", True)
+            except Exception as error:
+                screen._set_notice(NoticeLevel.ERROR, str(error), True)
+    if screen.play_request is None:
+        return
+    program, offset = screen.play_request
+    screen.play_request = None
+    try:
+        from radiko.auth import MemberClient
+        from radiko.prepare import play_station
+        from radiko.storage import SessionStore
+
+        store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
+        session = store.load()
+        if session is None:
+            screen._set_notice(
+                NoticeLevel.ERROR, "未ログインです。loginでログインしてください", True
+            )
+            return
+        membership = MemberClient.create().check(session)
+        report = play_station(
+            program.key.station_id,
+            "live" if screen.live else "timefree",
+            program.key.starts_at,
+            screen.now,
+            session,
+            membership,
+            offset,
+            None,
+            lambda: screen.quit,
+        )
+        screen.played_frames = report.frames
+        screen._set_notice(NoticeLevel.INFO, f"再生フレーム {report.frames}", False)
+    except Exception as error:
+        screen._set_notice(NoticeLevel.ERROR, str(error), True)
+
+
 def run(args: list[str], data_dir: Path | None) -> None:
     if args == ["--help"] or "--help" in args:
         from radiko_client.io import stdout_ln
@@ -689,8 +925,8 @@ def run(args: list[str], data_dir: Path | None) -> None:
     offline, rest = split_args(args)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError("対話端末で実行してください")
-    _ = rest, data_dir
-    screen = Screen([], datetime.now().astimezone(), offline=offline)
+    _ = rest
+    screen = Screen([], datetime.now().astimezone(), offline=offline, data_dir=data_dir)
     if offline:
         day = broadcast_day(screen.now)
         try:
@@ -718,6 +954,7 @@ def _terminal_loop(screen: Screen) -> None:
             sys.stdout.flush()
             key = _read_key()
             screen.handle(key)
+            perform_pending(screen)
     finally:
         sys.stdout.write("\x1b[?1049l")
         sys.stdout.flush()

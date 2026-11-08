@@ -608,23 +608,25 @@ def probe(
     raise last.at("HLS・サンプル取得")
 
 
-def _apply_seek(control, media, sequence: int, media_seconds: float):
-    """確定したシーク位置まで、終わったセグメントだけ飛ばす。
+def _apply_seek(control, media, sequence: int, media_seconds: float, origin: datetime, pending):
+    """目標より前に終わるセグメントは飛ばし、着地セグメントは後で切り詰める。"""
+    from radiko.timing import segment_wall
 
-    セグメントの途中は AAC を切り詰めない。表示上の位置は要求した秒のまま残す。
-    """
     if not control.accepted or control.applied == len(control.accepted):
-        return sequence, media_seconds
+        return sequence, media_seconds, pending
     target = control.accepted[-1]
     control.applied = len(control.accepted)
-    elapsed = 0.0
+    target_at = origin + timedelta(seconds=target)
     cursor = media.media_sequence
+    elapsed = 0.0
     for segment in media.segments:
-        if elapsed + segment.duration > target:
-            break
-        elapsed += segment.duration
-        cursor += 1
-    return cursor, elapsed
+        wall = segment_wall(media, cursor)
+        if wall is not None and target_at >= wall + timedelta(seconds=segment.duration):
+            elapsed += segment.duration
+            cursor += 1
+            continue
+        break
+    return cursor, target, (target_at, target)
 
 
 def _segment_at(media, sequence: int):
@@ -770,7 +772,7 @@ def _play_station(
 
     reauth = ReauthState(session, cancelled, now=reauth_now)
     from radiko.interactive import InteractiveControl
-    from radiko.timing import ReconnectBudget, accept_fragment, segment_wall
+    from radiko.timing import ReconnectBudget, accept_fragment, segment_wall, trim_pcm
 
     duration = (program.end - program.start).total_seconds()
     control = InteractiveControl(duration, mode, station)
@@ -787,6 +789,10 @@ def _play_station(
     fragment_decoder = None
     init_uri = None
     sequence = media.media_sequence
+    pending = None
+    if position:
+        pending = (program.start + timedelta(seconds=position), position)
+        media_seconds = position
     while True:
         if cancelled() or control.stopped:
             reason = "cancelled"
@@ -812,7 +818,9 @@ def _play_station(
         if control.paused:
             time.sleep(0.01)
             continue
-        sequence, media_seconds = _apply_seek(control, media, sequence, media_seconds)
+        sequence, media_seconds, pending = _apply_seek(
+            control, media, sequence, media_seconds, program.start, pending
+        )
         if sequence >= media.media_sequence + len(media.segments):
             reason = "program-end"
             break
@@ -906,6 +914,15 @@ def _play_station(
             rate = pcm.summary.sample_rate
             channels = pcm.summary.channels
             frame_count = pcm.summary.frames
+        if pending is not None:
+            target_at, target_seconds = pending
+            trimmed = trim_pcm(piece, channels, rate, segment_wall(media, sequence), target_at)
+            if trimmed is None:
+                sequence += 1
+                continue
+            piece, frame_count = trimmed
+            media_seconds = target_seconds
+            pending = None
         if limit is not None:
             room = limit - media_seconds
             if room <= 0:

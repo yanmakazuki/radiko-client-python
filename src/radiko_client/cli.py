@@ -94,14 +94,25 @@ CHAPTERS_USAGE = "chapters STATION YYYYMMDDHHmmss（日本時間、取得・一�
 def main(argv: list[str] | None = None) -> int:
     try:
         run(sys.argv[1:] if argv is None else argv)
-    except ClosedPipe:
-        return 141
-    except BrokenPipeError:
+    except (ClosedPipe, BrokenPipeError):
+        _silence_stdout()
         return 141
     except Exception as error:
         stderr_ln(f"エラー: {error}")
         return 1
     return 0
+
+
+def _silence_stdout() -> None:
+    """終了時の flush が壊れたパイプへ届き、141 が 120 に置き換わるのを防ぐ。"""
+    import os
+
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+    except OSError:
+        return
 
 
 def run(argv: list[str]) -> None:
