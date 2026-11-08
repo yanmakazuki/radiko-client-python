@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,7 +15,7 @@ from radiko.catalog import parse_endpoints, parse_stations
 from radiko.chapters import ChapterError, parse_chapters
 from radiko.domain import JST, ProgramKey, broadcast_day
 from radiko.hls import parse_media_playlist
-from radiko.http_client import stream_get
+from radiko.http_client import stream_get, transport_overrides
 from radiko.media import AacError, AdtsDecoder
 from radiko.storage import MemberSession, Membership
 from radiko.stream import (
@@ -387,7 +388,14 @@ def inspect_hls(url: str, headers: dict[str, str], retain: bool, cancelled) -> P
     codec = None
     current = url
     for _ in range(4):
-        reply = stream_get(current, headers, limit=TEXT_LIMIT, cancelled=cancelled, redirects=True)
+        reply = stream_get(
+            current,
+            headers,
+            limit=TEXT_LIMIT,
+            cancelled=cancelled,
+            redirects=True,
+            readonly_retry=True,
+        )
         text = reply.body.decode()
         current = reply.url
         if "#EXT-X-STREAM-INF:" in text and "#EXTINF:" not in text:
@@ -470,6 +478,7 @@ def _sample(media, playlist_url: str, headers, codec, retain: bool, cancelled) -
             limit=TEXT_LIMIT,
             cancelled=cancelled,
             redirects=True,
+            readonly_retry=True,
         ).body
     segment = stream_get(
         _join(playlist_url, first.uri.split("?", 1)[0] if False else first.uri),
@@ -477,6 +486,7 @@ def _sample(media, playlist_url: str, headers, codec, retain: bool, cancelled) -
         limit=SAMPLE_LIMIT,
         cancelled=cancelled,
         redirects=True,
+        readonly_retry=True,
     ).body
     if not segment:
         raise ProbeError("playlist")
@@ -598,6 +608,25 @@ def probe(
     raise last.at("HLS・サンプル取得")
 
 
+def _apply_seek(control, media, sequence: int, media_seconds: float):
+    """確定したシーク位置まで、終わったセグメントだけ飛ばす。
+
+    セグメントの途中は AAC を切り詰めない。表示上の位置は要求した秒のまま残す。
+    """
+    if not control.accepted or control.applied == len(control.accepted):
+        return sequence, media_seconds
+    target = control.accepted[-1]
+    control.applied = len(control.accepted)
+    elapsed = 0.0
+    cursor = media.media_sequence
+    for segment in media.segments:
+        if elapsed + segment.duration > target:
+            break
+        elapsed += segment.duration
+        cursor += 1
+    return cursor, elapsed
+
+
 def _segment_at(media, sequence: int):
     start = media.media_sequence
     if sequence < start or sequence >= start + len(media.segments):
@@ -623,7 +652,12 @@ def _get_or_recover(
 
     try:
         reply = stream_get(
-            url, send_headers, limit=SAMPLE_LIMIT, cancelled=cancelled, redirects=True
+            url,
+            send_headers,
+            limit=SAMPLE_LIMIT,
+            cancelled=cancelled,
+            redirects=True,
+            readonly_retry=True,
         )
         return reply.body, headers, media, playlist_url, sequence
     except ProbeError as error:
@@ -632,7 +666,12 @@ def _get_or_recover(
         headers, _how = state.renew(headers, stage)
         try:
             refreshed = stream_get(
-                playlist_url, headers, limit=TEXT_LIMIT, cancelled=cancelled, redirects=True
+                playlist_url,
+                headers,
+                limit=TEXT_LIMIT,
+                cancelled=cancelled,
+                redirects=True,
+                readonly_retry=True,
             )
         except ProbeError as again:
             if again.code == "authentication":
@@ -653,7 +692,12 @@ def _get_or_recover(
         retry = _join(playlist_url, target)
         try:
             reply = stream_get(
-                retry, headers, limit=SAMPLE_LIMIT, cancelled=cancelled, redirects=True
+                retry,
+                headers,
+                limit=SAMPLE_LIMIT,
+                cancelled=cancelled,
+                redirects=True,
+                readonly_retry=True,
             )
         except ProbeError as again:
             if again.code == "authentication":
@@ -675,6 +719,42 @@ def play_station(
     commands=None,
     reconnect_sleep=None,
     reauth_now=None,
+    on_notice=None,
+    transport_sleep=None,
+    transport_delays=None,
+) -> PlayReport:
+    with transport_overrides(transport_sleep, transport_delays):
+        return _play_station(
+            station,
+            mode,
+            cursor,
+            now,
+            session,
+            membership,
+            position,
+            limit,
+            cancelled,
+            commands,
+            reconnect_sleep,
+            reauth_now,
+            on_notice,
+        )
+
+
+def _play_station(
+    station: str,
+    mode: str,
+    cursor: datetime,
+    now: datetime,
+    session: MemberSession,
+    membership: Membership,
+    position: float,
+    limit: float | None,
+    cancelled,
+    commands=None,
+    reconnect_sleep=None,
+    reauth_now=None,
+    on_notice=None,
 ) -> PlayReport:
     from radiko.output import play_samples
     from radiko.stream import ProbeError
@@ -695,7 +775,7 @@ def play_station(
     duration = (program.end - program.start).total_seconds()
     control = InteractiveControl(duration, mode, station)
     budget = ReconnectBudget(cancelled, sleep=reconnect_sleep)
-    pending_commands = list(commands or [])
+    pending_commands = list(commands) if isinstance(commands, list) else []
     stamp = None
     samples: list[float] = []
     rate = 48000
@@ -711,16 +791,28 @@ def play_station(
         if cancelled() or control.stopped:
             reason = "cancelled"
             break
-        line = (
-            commands()
-            if callable(commands)
-            else (pending_commands.pop(0) if pending_commands else None)
-        )
-        if line:
+        while True:
+            line = (
+                commands()
+                if callable(commands)
+                else (pending_commands.pop(0) if pending_commands else None)
+            )
+            if not line:
+                break
+            before = len(control.messages)
             control.handle(line)
-        if control.stopped:
+            if on_notice is not None:
+                for message in control.messages[before:]:
+                    on_notice(message)
+            if control.stopped:
+                break
+        if control.stopped or cancelled():
             reason = "cancelled"
             break
+        if control.paused:
+            time.sleep(0.01)
+            continue
+        sequence, media_seconds = _apply_seek(control, media, sequence, media_seconds)
         if sequence >= media.media_sequence + len(media.segments):
             reason = "program-end"
             break
@@ -768,10 +860,26 @@ def play_station(
             if budget.can_retry(error, taken > 0):
                 try:
                     budget.wait()
+                    reply = stream_get(
+                        playlist_url,
+                        headers,
+                        limit=TEXT_LIMIT,
+                        cancelled=cancelled,
+                        redirects=True,
+                        readonly_retry=True,
+                    )
+                    media = parse_media_playlist(reply.body.decode())
+                    playlist_url = reply.url
                 except ProbeError as waited:
-                    if waited.code == "cancelled":
+                    if waited.code == "cancelled" or (
+                        waited.code == "at"
+                        and waited.inner is not None
+                        and waited.inner.code == "cancelled"
+                    ):
                         reason = "cancelled"
                         break
+                    if budget.can_retry(waited, True):
+                        continue
                     raise
                 continue
             raise
@@ -815,6 +923,7 @@ def play_station(
         media_seconds += len(piece) / channels / rate
         taken += 1
         sequence += 1
+        budget.reset()
         if limit is not None and media_seconds >= limit:
             reason = "limit"
             break
@@ -844,7 +953,14 @@ def _open_media(url: str, headers: dict[str, str], cancelled):
 
     current = url
     for _ in range(4):
-        reply = stream_get(current, headers, limit=TEXT_LIMIT, cancelled=cancelled, redirects=True)
+        reply = stream_get(
+            current,
+            headers,
+            limit=TEXT_LIMIT,
+            cancelled=cancelled,
+            redirects=True,
+            readonly_retry=True,
+        )
         text = reply.body.decode()
         current = reply.url
         if "#EXT-X-STREAM-INF:" in text and "#EXTINF:" not in text:

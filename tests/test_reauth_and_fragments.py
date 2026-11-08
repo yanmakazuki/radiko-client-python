@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
+
 from radiko.domain import JST
 from radiko.fragmented import synthetic_fragment, synthetic_init
 from radiko.media import encode_adts_sine, split_adts
@@ -59,6 +61,8 @@ class _State:
         self.mode = "fragments"
         self.cancel = threading.Event()
         self.forbid = False
+        self.limit = 0
+        self.failures = 0
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -100,7 +104,11 @@ class _Handler(BaseHTTPRequestHandler):
             media = (
                 "/frag/media.m3u8"
                 if state.mode in {"fragments", "skew"}
-                else ("/out/media.m3u8" if state.mode == "outage" else "/auth/media.m3u8")
+                else (
+                    "/out/media.m3u8"
+                    if state.mode in {"outage", "startup408", "http408", "drop"}
+                    else "/auth/media.m3u8"
+                )
             )
             body = (
                 "#EXTM3U\n"
@@ -125,14 +133,29 @@ class _Handler(BaseHTTPRequestHandler):
                 b"#EXTINF:1.0,\n/out/a.aac\n#EXTINF:1.0,\n/out/b.aac\n#EXT-X-ENDLIST\n"
             )
         elif parsed.path == "/out/a.aac":
-            body = ADTS
-        elif parsed.path == "/out/b.aac":
-            state.failures = getattr(state, "failures", 0) + 1
-            if state.failures <= 2:
-                self.send_response(500)
+            if state.mode == "startup408":
+                state.failures = getattr(state, "failures", 0) + 1
+                self.send_response(408)
                 self.end_headers()
                 return
             body = ADTS
+        elif parsed.path == "/out/b.aac":
+            state.failures = getattr(state, "failures", 0) + 1
+            if state.mode == "startup408":
+                body = ADTS
+            elif state.mode == "drop" and state.failures <= state.limit:
+                self.close_connection = True
+                return
+            elif state.mode == "http408" and state.failures <= state.limit:
+                self.send_response(408)
+                self.end_headers()
+                return
+            elif state.mode == "outage" and state.failures <= 8:
+                self.send_response(500)
+                self.end_headers()
+                return
+            else:
+                body = ADTS
         elif parsed.path == "/frag/init.mp4":
             body = INIT
         elif parsed.path == "/frag/1.m4s":
@@ -225,38 +248,141 @@ def test_program_date_skew_rejects_the_fragment(tmp_path, monkeypatch, capsys):
     assert "番組終了" not in out
 
 
-def test_outage_retries_on_a_virtual_clock_then_plays(tmp_path, monkeypatch, capsys):
-    server, state = _serve("outage")
-    _env(monkeypatch, server, tmp_path)
-    slept: list[float] = []
-
-    def virtual_sleep(seconds: float) -> None:
-        slept.append(seconds)
-
+def _run(server, data_dir, monkeypatch, **kwargs):
+    _env(monkeypatch, server, data_dir)
     from radiko.auth import MemberClient
     from radiko.prepare import play_station
 
     session = MemberSession("synthetic-token")
     membership = MemberClient.create().check(session)
     when = datetime.strptime(_yesterday(), "%Y%m%d%H%M%S").replace(tzinfo=JST)
+    return play_station(
+        "TBS",
+        "timefree",
+        when,
+        datetime.now(UTC),
+        session,
+        membership,
+        0.0,
+        30.0,
+        kwargs.pop("cancelled", lambda: False),
+        **kwargs,
+    )
+
+
+def test_outage_retries_on_a_virtual_clock_then_plays(tmp_path, monkeypatch, capsys):
+    server, state = _serve("outage")
+    slept: list[float] = []
+    delays: list[float] = []
     try:
-        report = play_station(
-            "TBS",
-            "timefree",
-            when,
-            datetime.now(UTC),
-            session,
-            membership,
-            0.0,
-            30.0,
-            lambda: False,
-            reconnect_sleep=virtual_sleep,
+        report = _run(
+            server,
+            tmp_path,
+            monkeypatch,
+            reconnect_sleep=slept.append,
+            transport_sleep=lambda _seconds: None,
+            transport_delays=delays,
         )
     finally:
         server.shutdown()
     assert report.reason == "program-end", report
     assert abs(sum(slept) - 3.0) < 1e-4
-    assert state.failures == 3
+    assert state.failures == 9
+    assert len(delays) == 6
+    assert state.paths.count("/out/media.m3u8") >= 3
+
+
+def test_startup_408_stops_before_the_reconnect_budget(tmp_path, monkeypatch):
+    server, state = _serve("startup408")
+    delays: list[float] = []
+    slept: list[float] = []
+    from radiko.stream import ProbeError
+
+    try:
+        with pytest.raises(ProbeError) as raised:
+            _run(
+                server,
+                tmp_path,
+                monkeypatch,
+                reconnect_sleep=slept.append,
+                transport_sleep=lambda _seconds: None,
+                transport_delays=delays,
+            )
+    finally:
+        server.shutdown()
+    assert raised.value.status == 408
+    assert state.failures == 4
+    assert slept == []
+    assert all(delay >= base for delay, base in zip(delays, (0.1, 0.2, 0.4), strict=True))
+    assert all(delay < base + 0.05 for delay, base in zip(delays, (0.1, 0.2, 0.4), strict=True))
+    assert "/out/b.aac" not in state.paths
+
+
+def test_408_after_audio_keeps_the_same_segment_and_waits_one_second(tmp_path, monkeypatch):
+    server, state = _serve("http408")
+    state.limit = 4
+    slept: list[float] = []
+    delays: list[float] = []
+    try:
+        report = _run(
+            server,
+            tmp_path,
+            monkeypatch,
+            reconnect_sleep=slept.append,
+            transport_sleep=lambda _seconds: None,
+            transport_delays=delays,
+        )
+    finally:
+        server.shutdown()
+    assert report.reason == "program-end", report
+    assert state.paths.count("/out/b.aac") == 5
+    assert abs(sum(slept) - 1.0) < 1e-4
+    assert len(delays) == 3
+    assert state.paths.count("/out/media.m3u8") >= 2
+
+
+def test_dropped_connection_uses_the_same_retry_sequence(tmp_path, monkeypatch):
+    server, state = _serve("drop")
+    state.limit = 1
+    slept: list[float] = []
+    delays: list[float] = []
+    try:
+        report = _run(
+            server,
+            tmp_path,
+            monkeypatch,
+            reconnect_sleep=slept.append,
+            transport_sleep=lambda _seconds: None,
+            transport_delays=delays,
+        )
+    finally:
+        server.shutdown()
+    assert report.reason == "program-end", report
+    assert state.paths.count("/out/b.aac") == 2
+    assert slept == []
+    assert len(delays) == 1
+    assert 0.1 <= delays[0] < 0.15
+
+
+def test_cancel_during_408_backoff_does_not_fetch_again(tmp_path, monkeypatch):
+    server, state = _serve("http408")
+    state.limit = 8
+    gate = {"stop": False}
+    try:
+        report = _run(
+            server,
+            tmp_path,
+            monkeypatch,
+            cancelled=lambda: gate["stop"],
+            reconnect_sleep=lambda _seconds: None,
+            transport_sleep=lambda _seconds: gate.__setitem__("stop", True),
+        )
+    finally:
+        server.shutdown()
+    assert report.reason == "cancelled"
+    assert report.frames == 0
+    assert state.paths.count("/out/b.aac") == 1
+    assert state.paths.count("/out/a.aac") == 1
 
 
 def test_two_fragments_play_through_the_real_boxes(tmp_path, monkeypatch, capsys):

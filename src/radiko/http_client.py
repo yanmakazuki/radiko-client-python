@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextvars
 import http.client
 import socket
 import ssl
 import time
+from contextlib import contextmanager
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
@@ -163,6 +165,42 @@ def catalog_fetch(url: str) -> bytes:
     return decode_body(reply.body, encoding)
 
 
+_transport_sleep = contextvars.ContextVar("radiko_transport_sleep", default=None)
+_transport_delays = contextvars.ContextVar("radiko_transport_delays", default=None)
+
+
+@contextmanager
+def transport_overrides(sleep, delays):
+    """再接続の内側の待ちだけを差し替える。認証の POST には使わない。"""
+    sleep_token = _transport_sleep.set(sleep)
+    delay_token = _transport_delays.set(delays)
+    try:
+        yield
+    finally:
+        _transport_sleep.reset(sleep_token)
+        _transport_delays.reset(delay_token)
+
+
+def _readonly_retryable(error: ProbeError) -> bool:
+    if error.code == "network":
+        return True
+    return error.code == "http" and (error.status == 408 or (error.status or 0) >= 500)
+
+
+def _retry_wait(delay: float, cancelled) -> None:
+    """100ms から倍々の待ちを 10ms ごとに取り消し確認する。ジッタは呼び出し側で足す。"""
+    sleep = _transport_sleep.get() or time.sleep
+    if cancelled():
+        raise ProbeError("cancelled")
+    left = delay
+    while left > 1e-12:
+        if cancelled():
+            raise ProbeError("cancelled")
+        slice_ = min(0.01, left)
+        sleep(slice_)
+        left -= slice_
+
+
 def stream_get(
     url: str,
     headers: dict[str, str] | None = None,
@@ -171,9 +209,38 @@ def stream_get(
     cancelled=None,
     redirects: bool = False,
     byte_range: tuple[int, int] | None = None,
+    readonly_retry: bool = False,
 ) -> Reply:
-    """本番 URL を載せ替えて取得する。401/403/404/429 は配信エラーにする。"""
+    """本番 URL を載せ替えて取得する。401/403/404/429 は配信エラーにする。
+
+    readonly_retry は再生の GET だけが使う。失敗 1 回につき 100ms、200ms、400ms に
+    0〜49ms を足して最大 3 回やり直す。認証の request_once には渡さない。
+    """
     cancelled = cancelled or (lambda: False)
+    attempt = 0
+    while True:
+        try:
+            return _stream_exchange(url, headers, limit, timeout, cancelled, redirects, byte_range)
+        except ProbeError as error:
+            if not readonly_retry or attempt >= 3 or not _readonly_retryable(error):
+                raise
+            delay = (100 * (1 << attempt) + (time.time_ns() // 1_000_000 % 50)) / 1000
+            recorded = _transport_delays.get()
+            if recorded is not None:
+                recorded.append(delay)
+            _retry_wait(delay, cancelled)
+            attempt += 1
+
+
+def _stream_exchange(
+    url: str,
+    headers: dict[str, str] | None,
+    limit: int,
+    timeout: float,
+    cancelled,
+    redirects: bool,
+    byte_range: tuple[int, int] | None,
+) -> Reply:
     current = transport_url(url)
     hops = 0
     while True:

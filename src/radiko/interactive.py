@@ -17,6 +17,7 @@ class InteractiveControl:
         self.stopped = False
         self.messages: list[str] = []
         self.accepted: list[float] = []
+        self.applied = 0
 
     def handle(self, line: str) -> None:
         text = line.strip()

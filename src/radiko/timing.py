@@ -97,3 +97,8 @@ class ReconnectBudget:
         self.waited += step
         self.steps.append(step)
         self.backoff = min(self.backoff * 2, BACKOFF_MAX)
+
+    def reset(self) -> None:
+        """セグメントを返せたら待ちを戻す。次の失敗は再び 1 秒からである。"""
+        self.waited = 0.0
+        self.backoff = BACKOFF_START

@@ -10,7 +10,7 @@ Rust 版 [radiko-client](https://github.com/yanmakazuki/radiko-client) の Pytho
 
 - Python 3.12 以降
 - Linux で音を出すとき、または `output-info` で機器を読むとき: ALSA（Debian / Ubuntu は `libasound2t64` または `libasound2`）
-- macOS の CoreAudio 出力は未実装です。引数の検査と、`RADIKO_NULL_SINK=1` のプロセス内出力は動きます
+- macOS では AudioToolbox の AudioQueue で f32 を出します。この Linux の試験はライブラリが無いときの失敗と、偽の AudioQueue への形式だけです。実機の再生は未検証です
 
 依存は次で固定しています。
 
@@ -54,6 +54,8 @@ cd /tmp
 `output-info` は既定の出力を読むだけで、音は出しません。機器が無いときは「既定の音声出力機器がありません」です。`RADIKO_ALSA_LOG=1` のときだけ ALSA の診断を残します。
 
 `RADIKO_NULL_SINK=1` は試験用のプロセス内出力です。Rust 版 CI の PulseAudio null sink に相当しますが、壁時計では待たず、渡したフレーム数だけ進みます。ハードウェアの出力ではありません。
+
+Linux の実出力は libasound の `default` です。macOS は CoreAudio の AudioQueue です。どちらも、この環境では音の出る装置としては確認していません。
 
 レート変換はしません。選ぶ形式は f32、次に i32、次に i16 です。
 

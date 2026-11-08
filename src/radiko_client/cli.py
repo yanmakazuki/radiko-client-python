@@ -784,6 +784,8 @@ def play(args: list[str], data_dir: Path | None) -> None:
     import threading
 
     commands = None
+    notice = None
+    stop = threading.Event()
     if interactive and sys.stdin.isatty():
         import queue
 
@@ -793,10 +795,12 @@ def play(args: list[str], data_dir: Path | None) -> None:
             for line in sys.stdin:
                 if stop.is_set():
                     return
-                try:
-                    box.put_nowait(line)
-                except queue.Full:
-                    pass
+                while not stop.is_set():
+                    try:
+                        box.put(line, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
 
         threading.Thread(target=reader, daemon=True).start()
         stderr_ln(
@@ -806,11 +810,11 @@ def play(args: list[str], data_dir: Path | None) -> None:
 
         def commands() -> str | None:
             try:
-                return box.get_nowait()
+                return box.get(timeout=0.05)
             except queue.Empty:
                 return None
 
-    stop = threading.Event()
+        notice = stderr_ln
     membership = _membership(session, stop)
     if stop.is_set():
         stdout_ln("中断しました")
@@ -830,6 +834,7 @@ def play(args: list[str], data_dir: Path | None) -> None:
         None if seconds is None else float(seconds),
         stop.is_set,
         commands,
+        on_notice=notice,
     )
     start = report.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     end = report.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")

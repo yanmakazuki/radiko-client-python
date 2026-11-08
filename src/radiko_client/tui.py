@@ -19,7 +19,7 @@ from radiko.domain import (
     broadcast_status,
 )
 from radiko.stream import validate_station
-from radiko.text import display_width, graphemes
+from radiko.text import cluster_width, display_width, graphemes
 
 QUIT_HINT = "終了は q（または Ctrl+C）"
 OFFLINE_NOTICE = "オフライン確認: 試験用の番組表です。通信と音声出力はしません"
@@ -393,6 +393,20 @@ class Screen:
         return full if display_width(full) <= self.width else short
 
     def render(self) -> list[str]:
+        if self.area == "help":
+            rows = self._overlay(help_text())
+            rows[-1] = truncate_width("q/Esc閉じる", self.width)
+            return rows
+        if self.area == "device":
+            return self._overlay(self.device_text or "出力機器")
+        if self.area == "failures":
+            return self._overlay("取得状況")
+        if self.area == "chapters":
+            return self._overlay("チャプター")
+        if self.area == "login":
+            return self._overlay("ログイン")
+        if self.area == "logout":
+            return self._overlay("ログアウトしますか（y で確定）")
         compact = self.height <= COMPACT_HEIGHT
         header = 2 if compact else 3
         notice = self.notice.text if self.notice else ""
@@ -453,6 +467,31 @@ class Screen:
         lines.append(truncate_width(shown, self.width))
         lines.append(truncate_width(hint(self.width), self.width))
         return lines[: self.height]
+
+    def cells(self) -> list[list[str]]:
+        """幅と高さに揃えたセル。全角は2列、2列目は空にする。書記素は分けない。"""
+        grid = []
+        for line in self.render():
+            row: list[str] = []
+            for cluster in graphemes(line):
+                row.append(cluster)
+                if cluster_width(cluster) == 2 and len(row) < self.width:
+                    row.append("")
+                if len(row) >= self.width:
+                    break
+            row.extend(" " for _ in range(self.width - len(row)))
+            grid.append(row[: self.width])
+        blank = [" "] * self.width
+        grid.extend(blank[:] for _ in range(self.height - len(grid)))
+        return grid[: self.height]
+
+    def _overlay(self, text: str) -> list[str]:
+        lines: list[str] = []
+        for paragraph in text.splitlines() or [""]:
+            lines.extend(wrap_display(paragraph, max(self.width, 1)))
+        shown = [truncate_width(line, self.width) for line in lines[: self.height]]
+        shown.extend("" for _ in range(self.height - len(shown)))
+        return shown
 
     def publish(self, generation: int, programs: list[Program]) -> bool:
         if generation != self.generation:

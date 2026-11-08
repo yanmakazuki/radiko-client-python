@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import sys
 import threading
 from array import array
 from contextlib import contextmanager
@@ -61,6 +62,15 @@ def null_sink_enabled() -> bool:
     return os.environ.get("RADIKO_NULL_SINK") == "1"
 
 
+def host_backend() -> str:
+    """実行中の OS が使う出力。Linux は ALSA、macOS は CoreAudio。"""
+    if sys.platform == "darwin":
+        return "coreaudio"
+    if sys.platform.startswith("linux"):
+        return "alsa"
+    return "unsupported"
+
+
 def show_alsa_logs() -> bool:
     return os.environ.get("RADIKO_ALSA_LOG") == "1"
 
@@ -70,6 +80,10 @@ def inspect_default_output(rate: int) -> OutputInfo:
         raise OutputError("device", "サンプルレートは8000〜192000Hzで指定してください")
     if null_sink_enabled():
         return OutputInfo("null", rate, "f32", 2, "")
+    if host_backend() == "coreaudio":
+        from radiko.coreaudio import inspect as inspect_coreaudio
+
+        return inspect_coreaudio(rate)
     opened = _open_default()
     if opened is None:
         raise OutputError("none")
@@ -155,6 +169,10 @@ def _consume(
         return OutputSummary(
             played, rate, info.channels or channels, info.sample_format or "f32", underruns
         )
+    if host_backend() == "coreaudio":
+        from radiko.coreaudio import play as play_coreaudio
+
+        return play_coreaudio(samples, rate, channels, info, stop)
     opened = _open_default()
     if opened is None:
         raise OutputError("none")
