@@ -192,12 +192,16 @@ def _search_store(data_dir: Path | None) -> SearchStore:
 
 
 def inspect_chapters(args: list[str]) -> None:
+    if args[2] != args[2].strip():
+        raise RuntimeError("放送枠の秒数が不正です")
     try:
         seconds = float(args[2])
     except ValueError as error:
         raise RuntimeError("放送枠の秒数が不正です") from error
     if seconds != seconds or abs(seconds) == float("inf") or seconds < 0:
         raise RuntimeError("放送枠の秒数が不正です")
+    if args[3] != args[3].strip():
+        raise RuntimeError("補正秒数が不正です")
     try:
         offset = float(args[3])
     except ValueError as error:
@@ -276,10 +280,16 @@ def output_info(args: list[str]) -> None:
     if len(args) == 1:
         rate = 48000
     else:
+        raw = args[1]
+        body = raw[1:] if raw.startswith("+") else raw
+        if not body or not body.isascii() or not body.isdigit():
+            raise RuntimeError("サンプルレートは正の整数Hzで指定してください")
         try:
-            rate = int(args[1])
+            rate = int(body)
         except ValueError as error:
             raise RuntimeError("サンプルレートは正の整数Hzで指定してください") from error
+        if rate > 0xFFFFFFFF:
+            raise RuntimeError("サンプルレートは正の整数Hzで指定してください")
     if not 8000 <= rate <= 192000:
         raise RuntimeError("サンプルレートは8000〜192000Hzで指定してください")
     try:
@@ -513,6 +523,8 @@ def build_criteria(args: list[str], now: datetime) -> SearchCriteria:
 
 def restored_request(args: list[str], now: datetime, store: SearchStore | None):
     saved = args[0] == "--saved"
+    if saved and len(args) < 2:
+        raise RuntimeError(PROGRAMS_USAGE)
     tail = args[2:] if saved else args[1:]
     as_json = classifications = False
     for arg in tail:
