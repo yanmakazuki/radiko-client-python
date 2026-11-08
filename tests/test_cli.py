@@ -209,6 +209,63 @@ def test_probe_requires_a_session_before_any_directory_is_created(tmp_path, caps
     assert not data.exists()
 
 
+def test_interactive_messages_are_not_reprinted_and_header_precedes_the_result(
+    tmp_path, capsys, monkeypatch
+):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from radiko.prepare import PlayReport
+    from radiko.storage import MemberSession, Membership, SessionStore
+    from radiko_client import cli
+
+    data = tmp_path / "data"
+    SessionStore(data).save(MemberSession("synthetic-token"))
+    program = SimpleNamespace(
+        title="合成番組",
+        start=datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc),
+        end=datetime(2026, 10, 15, 13, 0, tzinfo=timezone.utc),
+    )
+
+    def fake_play(*_args, **kwargs):
+        kwargs["on_ready"](program)
+        notice = kwargs.get("on_notice") or cli.stderr_ln
+        notice("合成メッセージ")
+        return PlayReport(
+            "limit",
+            1,
+            48000,
+            2,
+            1,
+            0,
+            program.title,
+            "TBS",
+            "Live",
+            program.start,
+            program.end,
+            ["合成メッセージ"],
+        )
+
+    import radiko.prepare
+
+    monkeypatch.setattr(radiko.prepare, "play_station", fake_play)
+    monkeypatch.setattr(cli, "_membership", lambda _session, _stop: Membership(True, True))
+    code, out, err = run(["--data-dir", str(data), "play-live", "TBS"], capsys)
+    assert code == 0, err
+    assert err.count("合成メッセージ") == 1
+    assert out.index("合成番組") < out.index("指定時間で停止しました")
+
+
+def test_interactive_invalid_switch_uses_the_single_rust_guidance():
+    from radiko.interactive import InteractiveControl
+
+    control = InteractiveControl(3600, "live", "TBS")
+    control.handle("timefree TBS")
+    assert control.messages == [
+        "live 局ID / timefree 局ID YYYYMMDDHHmmss [--offset 秒数] を指定してください"
+    ]
+
+
 def test_interactive_commands_reject_seconds_on_a_switch():
     now = __import__("datetime").datetime(
         2026, 10, 16, 12, 0, tzinfo=__import__("datetime").timezone.utc

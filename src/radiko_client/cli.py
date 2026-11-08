@@ -346,7 +346,14 @@ def probe_output(args: list[str]) -> None:
             raise RuntimeError("無音の出力診断は1〜1800秒で指定してください")
         previous = _sigint_stop(stop)
         try:
-            summary = probe_silent(seconds, stop)
+            summary = probe_silent(
+                seconds,
+                stop,
+                on_progress=lambda value: stderr_ln(
+                    f"無音出力中: {value.frames}フレーム / {value.sample_rate}Hz / "
+                    f"{value.sample_format} / 不足{value.underrun_frames}フレーム"
+                ),
+            )
         finally:
             _restore_sigint(previous)
         stdout_ln(
@@ -900,6 +907,14 @@ def play(args: list[str], data_dir: Path | None) -> None:
     from radiko.domain import JST
     from radiko.prepare import play_station
 
+    def ready(program) -> None:
+        start = program.start.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+        end = program.end.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+        label = "Live" if mode == "live" else "TimeFree"
+        stdout_ln(
+            f"{program.title or '番組名未取得'} / {station} / {label} / {start}–{end}（日本時間） / Ctrl+Cで停止"
+        )
+
     try:
         report = play_station(
             station,
@@ -913,6 +928,7 @@ def play(args: list[str], data_dir: Path | None) -> None:
             stop.is_set,
             commands,
             on_notice=notice,
+            on_ready=ready,
         )
     except ProbeError as error:
         _restore_sigint(previous)
@@ -925,18 +941,11 @@ def play(args: list[str], data_dir: Path | None) -> None:
         raise
     else:
         _restore_sigint(previous)
-    start = report.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
-    end = report.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
-    stdout_ln(
-        f"{report.title or '番組名未取得'} / {report.station} / {report.mode} / {start}–{end}（日本時間） / Ctrl+Cで停止"
-    )
     reason = {
         "program-end": "番組終了",
         "limit": "指定時間で停止しました",
         "cancelled": "中断しました",
     }[report.reason]
-    for message in report.messages or []:
-        stderr_ln(message)
     stdout_ln(reason)
     if report.reason != "cancelled":
         stdout_ln(

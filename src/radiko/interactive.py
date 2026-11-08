@@ -76,47 +76,46 @@ class InteractiveControl:
             return
         if text.startswith("live ") or text.startswith("timefree "):
             parts = text.split()
+            guidance = "live 局ID / timefree 局ID YYYYMMDDHHmmss [--offset 秒数] を指定してください"
             if len(parts) < 2:
-                self.messages.append("切替不可: 局・日時・開始位置を確認してください")
+                self.messages.append(guidance)
                 return
             try:
                 validate_station(parts[1])
             except Exception:
-                self.messages.append("切替不可: 局・日時・開始位置を確認してください")
+                self.messages.append(guidance)
                 return
             mode = parts[0]
             offset = 0.0
             now = datetime.now(timezone.utc)
             if mode == "timefree":
                 if len(parts) < 3:
-                    self.messages.append("切替不可: timefreeには日時が必要です")
+                    self.messages.append(guidance)
                     return
                 try:
                     cursor = parse_time(parts[2])
                 except Exception:
-                    self.messages.append(
-                        "切替不可: 日時は日本時間のYYYYMMDDHHmmssで指定してください"
-                    )
+                    self.messages.append(guidance)
                     return
                 rest = parts[3:]
                 if rest:
                     if len(rest) != 2 or rest[0] != "--offset":
-                        self.messages.append("切替不可: 日時と--offsetの指定を確認してください")
+                        self.messages.append(guidance)
                         return
                     try:
                         offset = float(rest[1])
                     except ValueError:
-                        self.messages.append("切替不可: 位置は0〜86400秒で指定してください")
+                        self.messages.append(guidance)
                         return
                     if not 0 <= offset <= 86400:
-                        self.messages.append("切替不可: 位置は0〜86400秒で指定してください")
+                        self.messages.append(guidance)
                         return
                 if cursor > now:
-                    self.messages.append("切替不可: 放送前のため配信取得できません")
+                    self.messages.append(guidance)
                     return
             else:
                 if len(parts) > 2:
-                    self.messages.append("切替不可: liveに日時は指定できません")
+                    self.messages.append(guidance)
                     return
                 cursor = now
             self.selected = (mode, parts[1], cursor, offset)
