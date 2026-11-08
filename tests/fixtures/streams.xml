@@ -1,0 +1,7 @@
+<urls>
+  <url areafree="0" timefree="0"><playlist_create_url>https://example.radiko-cf.com/live/master.m3u8</playlist_create_url></url>
+  <url areafree="1" timefree="0"><playlist_create_url>https://example.radiko-cf.com/area/master.m3u8</playlist_create_url></url>
+  <url areafree="0" timefree="1"><playlist_create_url>https://example.radiko-cf.com/timefree/master.m3u8</playlist_create_url></url>
+  <url areafree="0" timefree="1"><playlist_create_url>https://example.radiko-cf.com/timefree/master.m3u8</playlist_create_url></url>
+  <url areafree="1" timefree="1"><playlist_create_url>https://example.radiko-cf.com/paid/master.m3u8</playlist_create_url></url>
+</urls>
