@@ -135,7 +135,9 @@ def parse_programs(data: bytes, station: str, day: date) -> ProgramList:
     if len(stations) != 1:
         raise CatalogError("xml")
     station_nodes = [child for child in stations[0] if _local(child.tag) == "station"]
-    if len(station_nodes) != 1 or station_nodes[0].attrib.get("id") != station:
+    if len(station_nodes) != 1:
+        raise CatalogError("wrong-station")
+    if station_nodes[0].attrib.get("id") != station:
         raise CatalogError("wrong-station")
     selected = station_nodes[0]
     progs = [child for child in selected if _local(child.tag) == "progs"]
@@ -459,7 +461,7 @@ def acquire_range(
                 if area not in entry.areas:
                     entry.areas.append(area)
         progress(Progress("局一覧", area, index, len(unique), failed))
-    report.stations = list(selected.values())
+    report.stations = sorted(selected.values(), key=lambda item: item.station.id)
     for station in report.stations:
         station.areas.sort()
     if cancelled.is_set():
@@ -484,6 +486,10 @@ def acquire_stations(
     _schedules(source, span, report, cancelled, progress)
     if cancelled.is_set():
         raise CatalogError("cancelled")
+    for entry in report.stations:
+        listing = next((item for item in report.lists if item.station_id == entry.station.id), None)
+        if listing is not None:
+            entry.station = Station(entry.station.id, listing.station_name)
     return report
 
 
@@ -491,7 +497,7 @@ def _schedules(
     source, span: BroadcastRange, report: Report, cancelled: threading.Event, progress
 ) -> None:
     jobs = [(station.station.id, day) for station in report.stations for day in span.days]
-    failed = len(report.area_failures)
+    failed = 0
 
     def one(job):
         station, day = job
@@ -513,6 +519,11 @@ def _schedules(
         progress(Progress("番組表", station, index, len(jobs), failed, day, shown))
         if cancelled.is_set():
             return
+    report.lists.sort(key=lambda item: (item.station_id, item.broadcast_day))
+    report.area_failures.sort(key=lambda item: item.target)
+    report.schedule_failures.sort(
+        key=lambda item: (item.target, item.day.isoformat() if item.day else "")
+    )
 
 
 def _parallel(items, function, cancelled: threading.Event):

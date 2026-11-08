@@ -73,6 +73,53 @@ def test_programs_fixture_server_prints_titles(tmp_path, capsys, monkeypatch):
     assert "不正な放送枠" in err
 
 
+def test_programs_area_acquisition_prints_lists_failures_and_station_names(
+    tmp_path, capsys, monkeypatch
+):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Catalog)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("RADIKO_CATALOG_ORIGIN", f"http://127.0.0.1:{server.server_port}")
+    try:
+        code = main(
+            ["--data-dir", str(tmp_path / "data"), "programs", "--areas", "JP13", "20261015"]
+        )
+    finally:
+        server.shutdown()
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert "テスト局 (TBS)" in out
+    assert "朝 & 続編" in out
+    assert "部分取得・未取得あり" in out
+    assert "未取得番組表 RN1 2026-10-15" in err
+    assert "取得結果に欠落があります" in err
+
+
+def test_programs_multi_day_station_uses_the_fetched_station_name(tmp_path, capsys, monkeypatch):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Catalog)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("RADIKO_CATALOG_ORIGIN", f"http://127.0.0.1:{server.server_port}")
+    try:
+        code = main(
+            [
+                "--data-dir",
+                str(tmp_path / "data"),
+                "programs",
+                "TBS",
+                "20261015",
+                "20261016",
+                "--json",
+            ]
+        )
+    finally:
+        server.shutdown()
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert json.loads(out)["stations"] == [{"areas": [], "id": "TBS", "name": "テスト局"}]
+    assert "取得結果に欠落があります" in err
+
+
 def test_partial_key_and_auth_round_trip_hide_the_token(monkeypatch):
     assert partial_key(0, 4) == "YmNkMQ=="
     seen = {}

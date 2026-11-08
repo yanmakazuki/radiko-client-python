@@ -602,12 +602,25 @@ def _acquire(request: ProgramRequest, now: datetime) -> None:
             )
         )
     else:
+        for listing in report.lists:
+            _print_list(listing, now, request.filter)
         state = "取得完了" if report.complete() else "部分取得・未取得あり"
         stdout_ln(
             f"{state} / 放送日 {request.range.start}〜{request.range.end} / 局一覧成功: "
             f"{len(report.areas) - len(report.area_failures)}/{len(report.areas)}地域 / 番組表成功: "
             f"{len(report.lists)}/{len(report.stations) * len(request.range.days)}局・日"
         )
+        for failure in report.area_failures:
+            stderr_ln(f"未取得地域 {failure.target}（対象局も未確定）: {failure.error}")
+        for failure in report.schedule_failures:
+            day = "" if failure.day is None else str(failure.day)
+            stderr_ln(f"未取得番組表 {failure.target} {day}: {failure.error}")
+        if request.classifications:
+            _print_classes(
+                ObservedClassifications.collect(
+                    [program for listing in report.lists for program in listing.programs]
+                )
+            )
     if not report.complete():
         raise RuntimeError("取得結果に欠落があります。同じコマンドの再実行で全件を再取得できます")
 
