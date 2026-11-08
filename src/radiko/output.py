@@ -50,6 +50,15 @@ class OutputInfo:
 
 
 @dataclass
+class OutputCapability:
+    host: str
+    name: str
+    sample_rate: int
+    f32_mono: bool
+    f32_stereo: bool
+
+
+@dataclass
 class OutputSummary:
     frames: int
     sample_rate: int
@@ -73,6 +82,43 @@ def host_backend() -> str:
 
 def show_alsa_logs() -> bool:
     return os.environ.get("RADIKO_ALSA_LOG") == "1"
+
+
+def diagnose_default_output(rate: int) -> OutputCapability:
+    """既定機器の f32 mono / stereo を読む。再生ストリームは残さない。"""
+    if not PCM_RATE_MIN <= rate <= PCM_RATE_MAX:
+        raise OutputError("device", "サンプルレートは8000〜192000Hzで指定してください")
+    if null_sink_enabled():
+        return OutputCapability("null", "null", rate, True, True)
+    if host_backend() == "coreaudio":
+        from radiko.coreaudio import inspect as inspect_coreaudio
+
+        info = inspect_coreaudio(rate)
+        return OutputCapability(
+            "CoreAudio",
+            info.name,
+            rate,
+            info.channels == 1,
+            info.channels == 2,
+        )
+    mono = _supports_f32(rate, 1)
+    stereo = _supports_f32(rate, 2)
+    if mono is None and stereo is None:
+        raise OutputError("none")
+    return OutputCapability("alsa", "default", rate, bool(mono), bool(stereo))
+
+
+def _supports_f32(rate: int, channels: int) -> bool | None:
+    opened = _open_default()
+    if opened is None:
+        return None
+    library, handle = opened
+    try:
+        with _silence_stderr():
+            result = library.snd_pcm_set_params(handle, 14, 3, channels, rate, 0, 100000)
+        return result >= 0
+    finally:
+        _close(opened)
 
 
 def inspect_default_output(rate: int) -> OutputInfo:

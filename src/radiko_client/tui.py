@@ -21,6 +21,9 @@ from radiko.domain import (
 from radiko.stream import validate_station
 from radiko.text import cluster_width, display_width, graphemes
 
+DEVICE_NOTE = "出力機器は OS の既定に従います。アプリ内では選べません"
+DEVICE_GUIDANCE = "OSのサウンド設定を確認し、d で閉じてから Enter で再生し直してください"
+DEVICE_NONE = "既定の音声出力機器がありません"
 QUIT_HINT = "終了は q（または Ctrl+C）"
 OFFLINE_NOTICE = "オフライン確認: 試験用の番組表です。通信と音声出力はしません"
 USAGE = (
@@ -275,9 +278,21 @@ class Screen:
     stop_cause: str | None = None
     output_guide: str | None = None
     device_text: str = ""
+    device_status: str = "idle"
+    device_generation: int = 0
+    device_report: object | None = None
+    device_error: str = ""
+    device_box: object | None = None
+    device_probe: object | None = None
+    station_id: str = "TBS"
+    fetch_programs: bool = False
+    area_failures: list[tuple[str, str]] = field(default_factory=list)
+    schedule_failures: list[tuple[str, str, str]] = field(default_factory=list)
+    invalid_count: int = 0
     named: dict[str, SearchCriteria] = field(default_factory=dict)
     offline: bool = False
     quit: bool = False
+    revision: int = 0
     no_color: bool = False
     clock: float = 0.0
     mail: str = ""
@@ -357,7 +372,7 @@ class Screen:
             self.area = "failures"
         elif key == "d":
             self.area = "device"
-            self.device_text = "取得中…"
+            self._request_device()
         elif key == "v":
             self.live = not self.live
         elif key == "n" and self.area == "list":
@@ -421,9 +436,9 @@ class Screen:
             rows[-1] = truncate_width("q/Esc閉じる", self.width)
             return rows
         if self.area == "device":
-            return self._overlay(self.device_text or "出力機器")
+            return self._framed("出力機器", self._device_body())
         if self.area == "failures":
-            return self._overlay("取得状況")
+            return self._framed("取得状況・未取得範囲", self._failures_body())
         if self.area == "chapters":
             return self._overlay("チャプター")
         if self.area == "login":
@@ -653,6 +668,105 @@ class Screen:
         self.generation += 1
         self.fetches += 1
         self.area = "list"
+        if not self.offline:
+            self.fetch_programs = True
+
+    def _request_device(self) -> None:
+        import queue
+        import threading
+
+        self.device_generation += 1
+        generation = self.device_generation
+        self.device_status = "loading"
+        self.device_text = "取得中…"
+        box: queue.Queue = queue.Queue(1)
+        self.device_box = box
+        probe = self.device_probe
+
+        def work() -> None:
+            from radiko.output import OutputError, diagnose_default_output
+
+            try:
+                report = (probe or diagnose_default_output)(48000)
+                box.put((generation, report, ""))
+            except OutputError as error:
+                sentence = (
+                    DEVICE_NONE if error.code == "none" else f"出力機器を確認できません。{error}"
+                )
+                box.put((generation, None, sentence))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def poll_device(self) -> None:
+        box = self.device_box
+        if box is None:
+            return
+        import queue
+
+        try:
+            generation, report, sentence = box.get_nowait()
+        except queue.Empty:
+            return
+        if generation != self.device_generation:
+            return
+        self.device_box = None
+        self.revision += 1
+        if report is None:
+            self.device_status = "failed"
+            self.device_error = sentence
+            self.device_text = sentence
+            return
+        self.device_status = "ready"
+        self.device_report = report
+        self.device_error = ""
+        self.device_text = f"{report.host} / {report.name}"
+
+    def _device_body(self) -> str:
+        if self.device_status == "loading":
+            lines = ["取得中…"]
+        elif self.device_status == "failed":
+            mark = "" if self.no_color else "✕ "
+            lines = [f"{mark}{self.device_error}", DEVICE_GUIDANCE]
+        elif self.device_status == "ready" and self.device_report is not None:
+            report = self.device_report
+            mono = "対応" if report.f32_mono else "非対応"
+            stereo = "対応" if report.f32_stereo else "非対応"
+            lines = [
+                f"ホスト: {report.host}",
+                f"機器: {report.name}",
+                f"f32 mono {report.sample_rate}Hz: {mono}",
+                f"f32 stereo {report.sample_rate}Hz: {stereo}",
+                "最後の出力エラー: なし",
+            ]
+        else:
+            lines = ["機器: 未取得"]
+        lines.extend([DEVICE_NOTE, "q / Esc / d 閉じる"])
+        return "\n".join(lines)
+
+    def _failures_body(self) -> str:
+        if self.fetches == 0:
+            status = "未取得"
+        elif self.area_failures or self.schedule_failures:
+            status = "部分取得・未取得あり"
+        else:
+            status = "取得完了"
+        day = broadcast_day(self.now)
+        lines = [
+            f"{day}〜{day} JST / {status}",
+            f"地域失敗{len(self.area_failures)} / 局・日失敗{len(self.schedule_failures)} / 不正枠{self.invalid_count}",
+            "不正枠は番組一覧から除外します。今回の取得だけを表示します。",
+        ]
+        for target, error in self.area_failures:
+            lines.append(f"地域 {target}  / {error}")
+        for target, when, error in self.schedule_failures:
+            lines.append(f"番組表 {target} {when} / {error}")
+        if self.invalid_count:
+            lines.append(
+                f"不正枠除外 {self.station_id} {day} / {self.invalid_count}件（正常な枠は表示）"
+            )
+        lines.append("再生中: なし")
+        lines.append("上下・ページ・Home/End 選択 / e / q / Esc 閉じる / Ctrl+C 終了")
+        return "\n".join(lines)
 
     def _enter(self) -> None:
         if self.area == "filter":
@@ -838,6 +952,9 @@ def perform_pending(screen: Screen) -> None:
         screen.play_request = None
         screen.logout_request = False
         return
+    if screen.fetch_programs:
+        screen.fetch_programs = False
+        _fetch_programs(screen)
     if screen.logout_request:
         screen.logout_request = False
         from radiko.storage import SessionStore
@@ -914,6 +1031,26 @@ def perform_pending(screen: Screen) -> None:
         screen._set_notice(NoticeLevel.INFO, f"再生フレーム {report.frames}", False)
     except Exception as error:
         screen._set_notice(NoticeLevel.ERROR, str(error), True)
+    screen.revision += 1
+
+
+def _fetch_programs(screen: Screen) -> None:
+    from radiko.catalog import CatalogClient, CatalogError
+    from radiko.http_client import catalog_fetch
+
+    day = broadcast_day(screen.now)
+    screen.area_failures = []
+    screen.schedule_failures = []
+    try:
+        listed = CatalogClient(catalog_fetch).programs(screen.station_id, day)
+    except CatalogError as error:
+        screen.schedule_failures.append((screen.station_id, day.strftime("%Y%m%d"), str(error)))
+        screen._set_notice(NoticeLevel.WARNING, str(error), True)
+        return
+    screen.programs = listed.programs
+    screen.invalid_count = listed.invalid_count
+    screen.selected = min(screen.selected, max(len(screen.visible()) - 1, 0))
+    screen._set_notice(NoticeLevel.INFO, f"取得完了 {len(listed.programs)}枠", False)
 
 
 def run(args: list[str], data_dir: Path | None) -> None:
@@ -925,8 +1062,10 @@ def run(args: list[str], data_dir: Path | None) -> None:
     offline, rest = split_args(args)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError("対話端末で実行してください")
-    _ = rest
-    screen = Screen([], datetime.now().astimezone(), offline=offline, data_dir=data_dir)
+    station = next((arg for arg in rest if not arg.startswith("-")), "TBS")
+    screen = Screen(
+        [], datetime.now().astimezone(), offline=offline, data_dir=data_dir, station_id=station
+    )
     if offline:
         day = broadcast_day(screen.now)
         try:
@@ -947,28 +1086,52 @@ def _terminal_loop(screen: Screen) -> None:
         tty.setraw(fd)
         sys.stdout.write("\x1b[?1049h\x1b[2J")
         sys.stdout.flush()
+        painted = -1
         while not screen.quit:
-            sys.stdout.write("\x1b[H")
-            for line in screen.render():
-                sys.stdout.write(line + "\x1b[K\n")
-            sys.stdout.flush()
-            key = _read_key()
-            screen.handle(key)
+            screen.poll_device()
             perform_pending(screen)
+            if screen.revision != painted:
+                sys.stdout.write("\x1b[H")
+                for line in screen.render():
+                    sys.stdout.write(line + "\x1b[K\n")
+                sys.stdout.flush()
+                painted = screen.revision
+            key = _read_key(0.05)
+            if key:
+                screen.handle(key)
+                screen.revision += 1
     finally:
         sys.stdout.write("\x1b[?1049l")
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, previous)
 
 
-def _read_key() -> str:
-    char = sys.stdin.read(1)
+def _read_byte(timeout: float | None) -> str | None:
+    import os
+    import select
+
+    fd = sys.stdin.fileno()
+    if timeout is not None and not select.select([fd], [], [], timeout)[0]:
+        return None
+    try:
+        raw = os.read(fd, 1)
+    except BlockingIOError:
+        return None
+    if not raw:
+        return None
+    return raw.decode("utf-8", "ignore")
+
+
+def _read_key(timeout: float | None = None) -> str | None:
+    char = _read_byte(timeout)
+    if not char:
+        return None
     if char == "\x03":
         return "ctrl-c"
     if char == "\x1b":
-        rest = sys.stdin.read(1)
+        rest = _read_byte(0.02)
         if rest == "[":
-            code = sys.stdin.read(1)
+            code = _read_byte(0.02) or ""
             return {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end"}.get(
                 code, "esc"
             )
