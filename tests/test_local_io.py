@@ -138,6 +138,7 @@ def test_missing_alsa_device_message_and_optional_library_log(tmp_path):
 
 
 def test_null_sink_probe_counts_frames(monkeypatch, capsys):
+    """単体の null sink。1秒分の無音を壁時計では待たない。実機の再生時間ではない。"""
     monkeypatch.setenv("RADIKO_NULL_SINK", "1")
     assert main(["probe-output", "--mute", "1"]) == 0
     out, err = capsys.readouterr()

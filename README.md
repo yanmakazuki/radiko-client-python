@@ -81,7 +81,9 @@ RADIKO_NULL_SINK=1 radiko-client probe-output --mute 1
 radiko-client tui --help
 ```
 
-`play-live`、`play-timefree`、`probe-live`、`probe-timefree`、`chapters`、`play-sample` は、引数と未ログインを通信の前に返します。セッションがあっても、この版は radiko へ接続せず通信失敗として終了します。再生エンジン自体はライブラリにあり、ローカルの PCM と ADTS で試験しています。
+`probe-live`、`probe-timefree`、`play-sample`、`play-live`、`play-timefree`、`chapters` は、本番の URL を組み立てて取得します。試験で `RADIKO_LOOPBACK_ORIGIN=http://127.0.0.1:ポート` を付けると、同じパスをそのポートへ載せ替えます。付けないときは `https://radiko.jp` と `https://api.radiko.jp` へ出ます。実アカウントでの成功再生は、このリポジトリでは確認していません。
+
+`RADIKO_NULL_SINK=1` の再生完了は、壁時計でその秒数を待った結果ではありません。
 
 `tui --offline` はヘルプに出さない試験用です。端末で無いときは「対話端末で実行してください」で終了します。
 

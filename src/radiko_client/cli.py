@@ -74,8 +74,11 @@ TOP = (
 PROGRAMS_USAGE = (
     "programs STATION [START [END]] [--json] / programs (--areas JP13,JP14 | --all) [START [END]] [--json] "
     "[--genre IDS] [--personality IDS] [--keyword TEXT] [--genre-unclassified] [--personality-unclassified] "
-    "[--classifications]（START・END: YYYYMMDD、両端を含む最大30放送日）\n"
-    "programs --saved NAME [--json] [--classifications] / programs --restore [--json] [--classifications]"
+    "[--classifications]（START・END: YYYYMMDD、両端を含む最大30放送日）"
+)
+PROGRAMS_HELP = (
+    PROGRAMS_USAGE
+    + "\nprograms --saved NAME [--json] [--classifications] / programs --restore [--json] [--classifications]"
 )
 SEARCHES_USAGE = (
     "searches list / searches show NAME / searches restore / searches save NAME "
@@ -311,9 +314,10 @@ def probe_output(args: list[str]) -> None:
             f"{summary.sample_format} / {summary.channels}ch / バッファ不足: {summary.underrun_frames}フレーム"
         )
         return
-    if not 1 <= seconds <= 10:
-        raise RuntimeError("生成音の出力診断は1〜10秒で指定してください")
-    summary = probe_tone(seconds)
+    try:
+        summary = probe_tone(seconds)
+    except OutputError as error:
+        raise RuntimeError(str(error)) from error
     stdout_ln(
         f"生成音の出力完了: {summary.frames}フレーム / {summary.sample_rate}Hz / {summary.sample_format} / "
         f"{summary.channels}ch / バッファ不足: {summary.underrun_frames}フレーム"
@@ -372,7 +376,7 @@ def searches(args: list[str], data_dir: Path | None) -> None:
 
 def programs(args: list[str], data_dir: Path | None) -> None:
     if args == ["--help"]:
-        stdout_ln(PROGRAMS_USAGE)
+        stdout_ln(PROGRAMS_HELP)
         return
     now = datetime.now(timezone.utc)
     restoring = bool(args) and args[0] in {"--saved", "--restore"}
@@ -743,9 +747,31 @@ def chapters(args: list[str]) -> None:
     if len(args) != 2:
         raise RuntimeError(CHAPTERS_USAGE)
     validate_station(args[0])
-    parse_time(args[1])
-    # 実 radiko へは接続しない。取得関数はローカルサーバ試験が呼ぶ。
-    raise ProbeError("network")
+    cursor = parse_time(args[1])
+    from radiko.prepare import ChapterFailure, inspect_remote_chapters
+
+    try:
+        view = inspect_remote_chapters(args[0], cursor)
+    except ChapterFailure as error:
+        raise RuntimeError(str(error)) from error
+    from radiko.domain import JST
+
+    start = view.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+    end = view.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+    stdout_ln(f"{view.title or '番組名未取得'} / {view.station} / {start}–{end}（日本時間）")
+    if view.kind == "unresolved":
+        stdout_ln(f"{view.issue}（取得・位置補正を省略）")
+        return
+    if view.kind == "unavailable":
+        stdout_ln("チャプター未提供（生成待ちの場合があります）")
+        return
+    if view.kind == "aligned":
+        stdout_ln("放送枠・イベント原点一致（このCLIは閲覧のみ）")
+    else:
+        stdout_ln("メタデータ一致・音声位置未検証（閲覧のみ）")
+    stdout_ln(f"{view.count}件 / 楽曲除外{view.music}件 / 不正位置等{view.invalid}件")
+    for index, (begin, finish, title) in enumerate(view.rows or [], start=1):
+        stdout_ln(f"{index}: {begin:.3f}–{finish:.3f}秒 {title}")
 
 
 def play(args: list[str], data_dir: Path | None) -> None:
@@ -753,15 +779,48 @@ def play(args: list[str], data_dir: Path | None) -> None:
         stdout_ln(PLAY_USAGE)
         return
     now = datetime.now(timezone.utc)
-    request = _play_request(args, now)
-    store = _session_store(data_dir)
-    session = store.load()
-    if session is None:
-        raise RuntimeError("未ログインです。loginでログインしてください")
-    _ = request
-    if session.token == "":
-        raise RuntimeError("未ログインです。loginでログインしてください")
-    raise ProbeError("network")
+    mode, station, cursor, seconds, offset, interactive = _play_request(args, now)
+    session = _require_session(data_dir)
+    if interactive and not sys.stdin.isatty():
+        interactive = False
+    import threading
+
+    stop = threading.Event()
+    membership = _membership(session, stop)
+    if stop.is_set():
+        stdout_ln("中断しました")
+        return
+    stderr_ln("放送枠・配信条件を確認して連続再生を準備しています…")
+    from radiko.domain import JST
+    from radiko.prepare import play_station
+
+    report = play_station(
+        station,
+        mode,
+        cursor,
+        now,
+        session,
+        membership,
+        offset,
+        None if seconds is None else float(seconds),
+        stop.is_set,
+    )
+    start = report.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+    end = report.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+    stdout_ln(
+        f"{report.title or '番組名未取得'} / {report.station} / {report.mode} / {start}–{end}（日本時間） / Ctrl+Cで停止"
+    )
+    reason = {
+        "program-end": "番組終了",
+        "limit": "指定時間で停止しました",
+        "cancelled": "中断しました",
+    }[report.reason]
+    stdout_ln(reason)
+    if report.reason != "cancelled":
+        stdout_ln(
+            f"出力: {report.frames}フレーム / {report.sample_rate}Hz / {report.channels}ch / "
+            f"{report.segments}セグメント / バッファ不足: {report.underrun_frames}フレーム"
+        )
 
 
 def _play_request(args: list[str], now: datetime):
@@ -819,14 +878,100 @@ def _position(value: str) -> float:
 
 def probe_media(args: list[str], data_dir: Path | None) -> None:
     validate_station(args[1])
-    if args[0] == "probe-timefree" or (args[0] == "play-sample" and len(args) == 3):
+    now = datetime.now(timezone.utc)
+    if args[0] == "probe-live" or (args[0] == "play-sample" and len(args) == 2):
+        mode = "live"
+        cursor = now
+    else:
+        mode = "timefree"
         cursor = parse_time(args[2])
-        if cursor > datetime.now(timezone.utc):
+        if cursor > now:
             raise ProbeError("upcoming")
-    store = _session_store(data_dir)
-    if store.load() is None:
+    session = _require_session(data_dir)
+    import threading
+
+    stop = threading.Event()
+    membership = _membership(session, stop)
+    stderr_ln("会員セッション有効。放送枠・配信認証・HLSを検証しています…")
+    from radiko.prepare import probe
+
+    report = probe(
+        args[1], mode, cursor, now, session, membership, args[0] == "play-sample", stop.is_set
+    )
+    _print_probe(report)
+    if args[0] == "play-sample":
+        if not report.samples:
+            raise RuntimeError("取得したサンプルは音声出力に対応していません")
+        from radiko.output import play_samples
+
+        summary = play_samples(report.samples, report.sample_rate, report.channels)
+        stdout_ln(
+            f"先頭1セグメントの出力完了: {summary.frames}フレーム / {summary.sample_rate}Hz / "
+            f"{summary.channels}ch / バッファ不足: {summary.underrun_frames}フレーム"
+        )
+        stdout_ln(
+            "サンプル末尾で停止しました。連続再生にはplay-live／play-timefreeを使用してください"
+        )
+    else:
+        stdout_ln("音声出力は行っていません。30分連続再生・実際の番組末尾の停止は未検証です")
+
+
+def _require_session(data_dir: Path | None):
+    saved = _session_store(data_dir).load()
+    if saved is None:
         raise RuntimeError("未ログインです。loginでログインしてください")
-    raise ProbeError("network")
+    return saved
+
+
+def _membership(session, stop):
+    from radiko.auth import AuthError, MemberClient
+
+    try:
+        return MemberClient.create(stop.is_set).check(session)
+    except AuthError as error:
+        if error.code == "cancelled":
+            raise RuntimeError("中断しました") from error
+        raise
+
+
+def _print_probe(report) -> None:
+    from radiko.domain import JST
+
+    start = report.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+    end = report.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+    stdout_ln(f"{report.station} / {report.mode} / {start}–{end}（日本時間）")
+    outside = "true" if report.outside_area else "false"
+    end_list = "true" if report.end_list else "false"
+    stdout_ln(
+        f"認証エリア: {report.area} / エリア外: {outside} / 失敗した配信先: {report.failed_endpoints}"
+    )
+    stdout_ln(
+        f"HLS取得成功: {report.segments}セグメント / {report.playlist_seconds:.3f}秒 / ENDLIST: {end_list}"
+    )
+    codec = report.declared_codec or "未宣言"
+    stdout_ln(
+        f"HLS宣言コーデック: {codec} / サンプル形式: {report.container} / {report.sample_bytes}バイト"
+    )
+    if report.decode_error and report.packets == 0:
+        if report.decode_error.startswith("HE-AAC"):
+            stdout_ln(report.decode_error)
+        else:
+            stdout_ln(f"サンプル取得済み。AAC検証失敗: {report.decode_error}")
+        return
+    stdout_ln(
+        "AACセグメントのPyAVデコード成功: "
+        f"{report.packets}パケット / {report.frames}フレーム / {report.sample_rate}Hz / {report.channels}ch"
+    )
+    stdout_ln(
+        "AACコア: "
+        f"{report.core_sample_rate}Hz / {report.core_channels}ch / SBR検出: {str(report.sbr_detected).lower()} / "
+        f"モノラルからステレオへの拡張: {str(report.stereo_expansion).lower()}"
+    )
+    stdout_ln(
+        "デコードしたメディア: "
+        f"{report.media_duration:.3f}秒 / 処理時間: {report.decode_duration:.3f}秒 / 非ゼロサンプル: {report.nonzero_samples}"
+    )
+    stdout_ln("ADTSの公開デコードAPIにビットストリームのPSフラグはなく、明示シグナルは未確認です")
 
 
 def command_line(line: str, now: datetime):

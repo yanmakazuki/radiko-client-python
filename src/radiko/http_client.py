@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import http.client
 import socket
 import ssl
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from radiko.catalog import CatalogError, decode_body
 from radiko.stream import ProbeError
+from radiko.urls import transport_url
 
 
 class Reply:
@@ -159,3 +161,103 @@ def catalog_fetch(url: str) -> bytes:
         raise CatalogError("http", status=reply.status)
     encoding = reply.headers.get("content-encoding")
     return decode_body(reply.body, encoding)
+
+
+def stream_get(
+    url: str,
+    headers: dict[str, str] | None = None,
+    limit: int = 1024 * 1024,
+    timeout: float = 20.0,
+    cancelled=None,
+    redirects: bool = False,
+    byte_range: tuple[int, int] | None = None,
+) -> Reply:
+    """本番 URL を載せ替えて取得する。401/403/404/429 は配信エラーにする。"""
+    cancelled = cancelled or (lambda: False)
+    current = transport_url(url)
+    hops = 0
+    while True:
+        if cancelled():
+            raise ProbeError("cancelled")
+        status, header_map, body = _http_exchange(
+            current, headers or {}, limit, timeout, cancelled, byte_range
+        )
+        if status in {301, 302, 303, 307, 308} and redirects:
+            if hops >= 4:
+                raise ProbeError("unsafe")
+            location = header_map.get("location")
+            if not location:
+                raise ProbeError("unsafe")
+            current = transport_url(urljoin(current, location))
+            hops += 1
+            byte_range = None
+            continue
+        _raise_for_status(status, byte_range is not None)
+        if byte_range is not None:
+            offset, length = byte_range
+            end = offset + length - 1
+            content_range = header_map.get("content-range", "")
+            if not content_range.startswith(f"bytes {offset}-{end}/"):
+                raise ProbeError("playlist")
+        if cancelled():
+            raise ProbeError("cancelled")
+        return Reply(status, body, header_map, current)
+
+
+def _raise_for_status(status: int, ranged: bool) -> None:
+    if status == 200 and not ranged:
+        return
+    if status == 206 and ranged:
+        return
+    if status == 401:
+        raise ProbeError("authentication")
+    if status == 403:
+        raise ProbeError("denied")
+    if status == 404:
+        raise ProbeError("not-found")
+    if status == 429:
+        raise ProbeError("limited")
+    raise ProbeError("http", status=status)
+
+
+def _http_exchange(
+    url, headers, limit, timeout, cancelled, byte_range
+) -> tuple[int, dict[str, str], bytes]:
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    request_headers = {key: value for key, value in headers.items()}
+    if byte_range is not None:
+        offset, length = byte_range
+        if length <= 0 or length > limit:
+            raise ProbeError("large")
+        request_headers["Range"] = f"bytes={offset}-{offset + length - 1}"
+    connection: http.client.HTTPConnection
+    if parsed.scheme == "https":
+        connection = http.client.HTTPSConnection(
+            parsed.hostname, parsed.port or 443, timeout=timeout
+        )
+    else:
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
+    try:
+        if cancelled():
+            raise ProbeError("cancelled")
+        connection.request("GET", path, headers=request_headers)
+        response = connection.getresponse()
+        status = response.status
+        header_map = {key.lower(): value for key, value in response.getheaders()}
+        body = _read_limited(response, limit, cancelled)
+        return status, header_map, body
+    except ProbeError:
+        raise
+    except (
+        http.client.HTTPException,
+        TimeoutError,
+        socket.timeout,
+        ssl.SSLError,
+        OSError,
+    ) as error:
+        raise ProbeError("network") from error
+    finally:
+        connection.close()

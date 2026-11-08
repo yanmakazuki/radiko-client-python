@@ -61,6 +61,11 @@ def auth_base() -> str:
         ):
             return f"http://127.0.0.1:{parsed.port}"
         raise AuthError("network")
+    from radiko.urls import loopback_origin
+
+    origin = loopback_origin()
+    if origin:
+        return origin
     return "https://radiko.jp"
 
 

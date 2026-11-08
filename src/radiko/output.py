@@ -86,7 +86,7 @@ def inspect_default_output(rate: int) -> OutputInfo:
 
 def probe_tone(seconds: int) -> OutputSummary:
     if not 1 <= seconds <= 10:
-        raise OutputError("device", "生成音の出力診断は1〜10秒で指定してください")
+        raise OutputError("pcm", "出力用PCMまたは再生時間が不正です")
     return _play_generated(seconds, tone=True)
 
 
