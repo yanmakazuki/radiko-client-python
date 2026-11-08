@@ -25,8 +25,8 @@
 | HLS の少し古い窓と、タイムフリーの窓喪失 | 対応 | 通し番号の判定だけ |
 | MP4 箱のサンプル数上限 | 対応 | 復号の前に拒否 |
 | ADTS の CRC・複数 block 拒否と AAC 復号 | 意図した差 | 復号は PyAV（libavcodec）。PCM は rusty_aac とビット一致しない |
-| fragmented MP4 の連続再生、`PROGRAM-DATE-TIME` と `tfdt` の 2ms 照合 | 未実装 | 箱の上限とコンテナ名の判別だけ。probe の本線は ADTS |
-| 再生中の 401 再認証、ライブの追いつき全文、5 分再接続 | 未実装 | 準備中の 401 と取り消しは返す。再生中の差し替えはまだ |
+| fragmented MP4 の連続再生 | 部分 | 単一 AAC、一つの traf/trun/mdat、tfdt と通し番号の連続、失敗で状態を捨てる。復号は PyAV。`PROGRAM-DATE-TIME` と `tfdt` の 2ms 照合は未実装 |
+| 再生中の 401 再認証 | 部分 | セグメントの 401 で auth1/auth2 を一度行い、同じ通し番号を取り直す。直後の再 401 は期限切れ。403 は再認証しない。20 秒の再利用はコードにあるが、壁時計の 20 秒試験はしていない。ライブの 401 後の追いつきはローカルで 1 件。5 分の再接続待ちは未実装 |
 | 会員ログイン手順 | 部分 | POST は再試行しない。契約フラグと auth1/auth2 はローカルの本番パスで確認。実アカウントは未使用 |
 | 配信解決 | 部分 | 番組 JSON、エリア、黒枠、配信先 XML、プレイリストのクエリまで本番 URL で接続した。署名 URL の全例外はまだ |
 
@@ -43,7 +43,7 @@
 | `programs` の取得 | 部分 | `RADIKO_CATALOG_ORIGIN` が `http://127.0.0.1` のときだけ。fixture サーバで JSON と本文を確認。既定の `https://radiko.jp` はテストしていない |
 | `output-info` / `probe-output` | 部分 | 引数範囲は一致。機器が無い Linux は「既定の音声出力機器がありません」。`RADIKO_NULL_SINK=1` は壁時計では待たない単体出力 |
 | `probe-live` / `probe-timefree` / `play-sample` / `play-live` / `play-timefree` / `chapters` | 部分 | 本番 URL を組み立て、`RADIKO_LOOPBACK_ORIGIN` のときだけ同じパスを `127.0.0.1` へ載せる。会員確認、auth1/auth2、番組 JSON、局一覧、配信先 XML、HLS、ADTS、取り消しをこの経路で確認した。変数が無いときは本番ホストへ出る。実 radiko の成功再生は未試験 |
-| `--interactive` | 未実装 | 非 TTY ではフラグを無視して一本の再生に進む |
+| `--interactive` | 未実装 | 非 TTY ではフラグを無視して一本の再生に進む。行コマンドの解析関数はあるが、再生ループには挟んでいない |
 | 終了コード 141 | 意図した差 | 定数と分類はある。閉じたパイプのプロセス試験はまだ |
 
 ## TUI
@@ -68,8 +68,8 @@
 
 ## オフライン CLI の突き合わせ
 
-`a7eaefa56729161e449a03ab2c0d2872429d8e87` を Rust 1.85.0 でビルドした `radiko-client` と、同じ引数の Python プロセスを比べた。ヘルプ、不正な引数、`session` / `logout` / `login`、`searches` の保存・表示・一覧・復元・削除、`inspect-chapters` は、終了コードと標準出力と標準エラーが一致した。通信が要るコマンドと、TUI のセルは比べていない。バイナリが無い CI では `tests/test_rust_cli_compare.py` を飛ばす。
+`a7eaefa56729161e449a03ab2c0d2872429d8e87` を Rust 1.85.0 でビルドした `radiko-client` と、同じ引数の Python プロセスを比べた。ヘルプ、不正な引数、`session` / `logout` / `login`、`searches` の保存・表示・一覧・復元・削除、`inspect-chapters` は、終了コードと標準出力と標準エラーが一致した。通信が要るコマンドと、TUI のセルは比べていない。CI の `Compare offline CLI with pinned Rust` が、同じ SHA をその場でビルドして同じ比較を行う。バイナリのダウンロードはしない。通常の pytest ジョブだけでは、そのバイナリが無いので比較は飛ばす。
 
 ## 次の区切り
 
-fragmented MP4 の連続復号、再生中の 401 再認証、ライブの追いつき表示、macOS の CoreAudio、TUI の実画面。TUI の状態機械の試験はセル一致ではない。
+`PROGRAM-DATE-TIME` と `tfdt` の 2ms 照合、再生中の 5 分再接続、`--interactive` を再生へ挟むこと、macOS の CoreAudio、TUI のセル。状態機械の試験は画面の一致ではない。20 秒以内の再認証抑制は実装したが、20 秒待つ試験はしていない。

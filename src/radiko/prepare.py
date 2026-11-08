@@ -597,6 +597,70 @@ def probe(
     raise last.at("HLS・サンプル取得")
 
 
+def _segment_at(media, sequence: int):
+    start = media.media_sequence
+    if sequence < start or sequence >= start + len(media.segments):
+        return None
+    return media.segments[sequence - start]
+
+
+def _get_or_recover(
+    url,
+    send_headers,
+    stage,
+    state,
+    headers,
+    playlist_url,
+    media,
+    sequence,
+    mode,
+    cancelled,
+    kind="media",
+):
+    from radiko.hls import HlsCursor
+    from radiko.stream import ProbeError
+
+    try:
+        reply = stream_get(
+            url, send_headers, limit=SAMPLE_LIMIT, cancelled=cancelled, redirects=True
+        )
+        return reply.body, headers, media, playlist_url, sequence
+    except ProbeError as error:
+        if error.code != "authentication":
+            raise
+        headers, _how = state.renew(headers, stage)
+        try:
+            refreshed = stream_get(
+                playlist_url, headers, limit=TEXT_LIMIT, cancelled=cancelled, redirects=True
+            )
+        except ProbeError as again:
+            if again.code == "authentication":
+                raise ProbeError("auth-expired").at(stage) from again
+            raise
+        updated = parse_media_playlist(refreshed.body.decode())
+        playlist_url = refreshed.url
+        segment = _segment_at(updated, sequence)
+        if segment is None and mode == "live":
+            cursor = HlsCursor(True, media, sequence, None)
+            cursor.install(updated)
+            updated = cursor.media
+            sequence = cursor.next_sequence
+            segment = _segment_at(updated, sequence)
+        if segment is None:
+            raise ProbeError("window")
+        target = segment.map_uri if kind == "init" and segment.map_uri else segment.uri
+        retry = _join(playlist_url, target)
+        try:
+            reply = stream_get(
+                retry, headers, limit=SAMPLE_LIMIT, cancelled=cancelled, redirects=True
+            )
+        except ProbeError as again:
+            if again.code == "authentication":
+                raise ProbeError("auth-expired").at(stage) from again
+            raise
+        return reply.body, headers, updated, playlist_url, sequence
+
+
 def play_station(
     station: str,
     mode: str,
@@ -617,6 +681,10 @@ def play_station(
     if not urls:
         raise ProbeError("endpoint")
     playlist_url, media = _open_media(urls[0], headers, cancelled)
+    from radiko.fragmented import FragmentedAacDecoder
+    from radiko.reauth import ReauthState
+
+    reauth = ReauthState(session, cancelled)
     samples: list[float] = []
     rate = 48000
     channels = 2
@@ -624,45 +692,90 @@ def play_station(
     media_seconds = 0.0
     reason = "program-end"
     decoder = AdtsDecoder()
-    for segment in media.segments:
+    fragment_decoder = None
+    init_uri = None
+    sequence = media.media_sequence
+    while True:
         if cancelled():
             reason = "cancelled"
             break
+        if sequence >= media.media_sequence + len(media.segments):
+            reason = "program-end"
+            break
+        segment = _segment_at(media, sequence)
+        if segment is None:
+            raise ProbeError("window")
         try:
-            payload = stream_get(
+            if segment.map_uri and segment.map_uri != init_uri:
+                init_bytes, headers, media, playlist_url, sequence = _get_or_recover(
+                    _join(playlist_url, segment.map_uri),
+                    {},
+                    "HLS初期化情報取得",
+                    reauth,
+                    headers,
+                    playlist_url,
+                    media,
+                    sequence,
+                    mode,
+                    cancelled,
+                    "init",
+                )
+                fragment_decoder = FragmentedAacDecoder(init_bytes)
+                init_uri = segment.map_uri
+                segment = _segment_at(media, sequence)
+                if segment is None:
+                    raise ProbeError("window")
+            payload, headers, media, playlist_url, sequence = _get_or_recover(
                 _join(playlist_url, segment.uri),
                 {},
-                limit=SAMPLE_LIMIT,
-                cancelled=cancelled,
-                redirects=True,
-            ).body
+                "HLS音声取得",
+                reauth,
+                headers,
+                playlist_url,
+                media,
+                sequence,
+                mode,
+                cancelled,
+            )
         except ProbeError as error:
-            if error.code == "cancelled":
+            if error.code == "cancelled" or (
+                error.code == "at" and error.inner is not None and error.inner.code == "cancelled"
+            ):
                 reason = "cancelled"
                 break
             raise
-        if cancelled():
-            reason = "cancelled"
-            break
-        pcm = decoder.decode_segment_pcm(payload, None, cancelled)
-        rate = pcm.summary.sample_rate
-        channels = pcm.summary.channels
-        piece = pcm.samples
+        reauth.episode = False
+        if fragment_decoder is not None and (
+            payload[4:8] in {b"moof", b"styp"} or (len(payload) > 8 and payload[4:8] == b"moof")
+        ):
+            decoded = fragment_decoder.decode_pcm(payload, cancelled)
+            piece = decoded.samples
+            rate = decoded.sample_rate
+            channels = decoded.channels
+            frame_count = decoded.frames
+        else:
+            pcm = decoder.decode_segment_pcm(payload, None, cancelled)
+            piece = pcm.samples
+            rate = pcm.summary.sample_rate
+            channels = pcm.summary.channels
+            frame_count = pcm.summary.frames
         if limit is not None:
             room = limit - media_seconds
             if room <= 0:
                 reason = "limit"
                 break
             max_frames = int(room * rate)
-            if pcm.summary.frames > max_frames:
+            if frame_count > max_frames:
                 piece = piece[: max_frames * channels]
                 samples.extend(piece)
                 taken += 1
+                sequence += 1
                 reason = "limit"
                 break
         samples.extend(piece)
         media_seconds += len(piece) / channels / rate
         taken += 1
+        sequence += 1
         if limit is not None and media_seconds >= limit:
             reason = "limit"
             break
