@@ -184,6 +184,21 @@ def test_missing_alsa_device_message_and_optional_library_log(tmp_path):
     assert "既定の音声出力機器がありません" in verbose.stderr
 
 
+def test_output_format_priority_prefers_f32_mono_over_i16_stereo(monkeypatch):
+    from radiko.output import _select_format
+
+    calls = []
+
+    class _Library:
+        def snd_pcm_set_params(self, handle, code, access, channels, rate, soft, latency):
+            calls.append((code, channels))
+            return 0 if (code == 14 and channels == 1) or (code == 2 and channels == 2) else -1
+
+    selected = _select_format((_Library(), object()), 48000)
+    assert selected == ("f32", 1)
+    assert calls == [(14, 2), (14, 1)]
+
+
 def test_null_sink_probe_counts_frames(monkeypatch, capsys):
     """単体の null sink。1秒分の無音を壁時計では待たない。実機の再生時間ではない。"""
     monkeypatch.setenv("RADIKO_NULL_SINK", "1")

@@ -311,8 +311,8 @@ def _close(opened) -> None:
 
 def _select_format(opened, rate: int):
     library, handle = opened
-    for channels in (2, 1):
-        for name, code in _FORMATS:
+    for name, code in _FORMATS:
+        for channels in (2, 1):
             with _silence_stderr():
                 result = library.snd_pcm_set_params(handle, code, 3, channels, rate, 0, 100000)
             if result >= 0:
