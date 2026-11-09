@@ -137,3 +137,146 @@ def test_filter_uses_frozenset_genres_and_cached_search_text():
     assert Filter.create([], [], False, False, "本文タグ").matches(program) is False
     assert Filter.create([], [], False, False, "タグ").matches(program) is True
     assert keyword_filter.to_dict()["keyword"] == "パーソナリティ"
+
+
+# --- Issue #7: TUI の表示幅計算 ---
+
+from radiko.text import display_width, graphemes  # noqa: E402
+from radiko_client.tui import (  # noqa: E402
+    LineEditor,
+    Screen,
+    help_text,
+    truncate_width,
+    wrap_display,
+)
+
+
+def legacy_truncate(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if display_width(text) <= width:
+        return text
+    kept = ""
+    for cluster in graphemes(text):
+        if display_width(kept + cluster) > width:
+            break
+        kept += cluster
+    return kept
+
+
+def legacy_wrap(text: str, width: int) -> list[str]:
+    if text == "":
+        return [""]
+    if width == 0:
+        return [text]
+    lines: list[str] = []
+    current = ""
+    used = 0
+    for cluster in graphemes(text):
+        size = display_width(cluster)
+        if current and used + size > width:
+            lines.append(current)
+            current = ""
+            used = 0
+        current += cluster
+        used += size
+    lines.append(current)
+    return lines
+
+
+def legacy_view(value: str, cursor: int, columns: int) -> tuple[str, int]:
+    clusters = graphemes(value)
+    index = 0
+    cursor_cluster = 0
+    for position, cluster in enumerate(clusters):
+        if index >= cursor:
+            cursor_cluster = position
+            break
+        index += len(cluster.encode())
+    else:
+        cursor_cluster = len(clusters)
+    if columns <= 0:
+        return value, 0
+    start = 0
+    while (
+        display_width("".join(clusters[start:cursor_cluster])) >= columns and start < cursor_cluster
+    ):
+        start += 1
+    end = cursor_cluster
+    while end < len(clusters) and display_width("".join(clusters[start : end + 1])) <= columns:
+        end += 1
+    text = "".join(clusters[start:end])
+    column = display_width("".join(clusters[start:cursor_cluster]))
+    if column >= columns:
+        column = max(columns - 1, 0)
+    return text, column
+
+
+WIDTH_TEXTS = [
+    "",
+    "a",
+    "あいうえお",
+    "番組名です",
+    "a\u0301b\u0301c",
+    "👨‍👩‍👧‍👦家族",
+    "𠮷野家のうなぎ",
+    "ＡＢＣ１２３",
+    "e\u0301\u0327x",
+]
+
+
+def test_truncate_width_and_wrap_display_match_legacy():
+    for text in WIDTH_TEXTS:
+        for width in range(0, 14):
+            assert truncate_width(text, width) == legacy_truncate(text, width)
+            assert wrap_display(text, width) == legacy_wrap(text, width)
+
+
+def test_line_editor_view_matches_legacy_for_every_cursor():
+    for text in WIDTH_TEXTS:
+        points = [0]
+        for cluster in graphemes(text):
+            points.append(points[-1] + len(cluster.encode()))
+        for cursor in points:
+            editor = LineEditor(text, cursor, 4096)
+            for columns in range(0, 10):
+                assert editor.view(columns) == legacy_view(text, cursor, columns)
+
+
+def test_line_editor_editing_keeps_cursor_on_grapheme_boundaries():
+    editor = LineEditor.new("", 1024)
+    for char in ["あ", "a", "\u0301", "い"]:
+        editor.handle(char)
+    assert editor.value == "あa\u0301い"
+    editor.handle("backspace")
+    assert editor.value == "あa\u0301"
+    editor.handle("left")
+    editor.handle("left")
+    editor.handle("delete")
+    assert editor.value == "a\u0301"
+    for point in [0, len(editor.value.encode())]:
+        editor.cursor = point
+        editor.handle("left")
+        assert 0 <= editor.cursor <= len(editor.value.encode())
+
+
+def test_help_text_is_cached_and_render_calls_visible_once(monkeypatch):
+    assert help_text() is help_text()
+    assert help_text.cache_info().maxsize == 1
+
+    start = datetime(2026, 10, 15, 10, 0, tzinfo=JST)
+    program = Program(ProgramKey("TBS", start), "id", start + timedelta(hours=1), "番組")
+    screen = Screen([program], start, width=40, height=20, area="keyword")
+    calls = {"count": 0}
+    original = Screen.visible
+
+    def counting(self):
+        calls["count"] += 1
+        return original(self)
+
+    monkeypatch.setattr(Screen, "visible", counting)
+    rows = screen.render()
+    assert rows
+    assert calls["count"] == 1
+    assert screen.keyword_preview() is not None
+    assert calls["count"] == 2

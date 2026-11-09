@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -115,6 +116,7 @@ class FilterForm:
         )
 
 
+@functools.lru_cache(maxsize=1)
 def help_text() -> str:
     path = Path(__file__).with_name("help_text.txt")
     if path.exists():
@@ -156,27 +158,28 @@ class LineEditor:
         return cls(value, len(value.encode()), byte_limit)
 
     def handle(self, key: str) -> None:
-        self.cursor = _snap(self.value, min(self.cursor, len(self.value.encode())))
+        points = _boundaries(self.value)
+        self.cursor = min(points, key=lambda point: (abs(point - self.cursor), point))
+        raw = self.value.encode()
+        index = points.index(self.cursor)
         if key == "ctrl-u":
             self.value = ""
             self.cursor = 0
         elif key == "backspace":
-            start = _previous(self.value, self.cursor)
-            raw = self.value.encode()
+            start = points[index - 1] if index > 0 else 0
             self.value = (raw[:start] + raw[self.cursor :]).decode()
             self.cursor = start
         elif key == "delete":
-            end = _next(self.value, self.cursor)
-            raw = self.value.encode()
+            end = points[index + 1] if index + 1 < len(points) else len(raw)
             self.value = (raw[: self.cursor] + raw[end:]).decode()
         elif key == "left":
-            self.cursor = _previous(self.value, self.cursor)
+            self.cursor = points[index - 1] if index > 0 else 0
         elif key == "right":
-            self.cursor = _next(self.value, self.cursor)
+            self.cursor = points[index + 1] if index + 1 < len(points) else len(raw)
         elif key == "home":
             self.cursor = 0
         elif key == "end":
-            self.cursor = len(self.value.encode())
+            self.cursor = len(raw)
         elif (
             len(key) == 1
             and key.isprintable()
@@ -184,7 +187,6 @@ class LineEditor:
             or (len(key) == 1 and key not in {"\n", "\t"} and key.isprintable())
         ):
             self._insert(key)
-        self.cursor = _snap(self.value, min(self.cursor, len(self.value.encode())))
 
     def _insert(self, char: str) -> None:
         if len(self.value.encode()) + len(char.encode()) > self.byte_limit:
@@ -196,29 +198,28 @@ class LineEditor:
         self.cursor += len(char.encode())
 
     def view(self, columns: int) -> tuple[str, int]:
+        if columns <= 0:
+            return self.value, 0
         clusters = graphemes(self.value)
+        widths = [cluster_width(cluster) for cluster in clusters]
+        prefix = [0] * (len(widths) + 1)
+        for position, width in enumerate(widths):
+            prefix[position + 1] = prefix[position] + width
         index = 0
-        cursor_cluster = 0
+        cursor_cluster = len(clusters)
         for position, cluster in enumerate(clusters):
             if index >= self.cursor:
                 cursor_cluster = position
                 break
             index += len(cluster.encode())
-        else:
-            cursor_cluster = len(clusters)
-        if columns <= 0:
-            return self.value, 0
         start = 0
-        while (
-            display_width("".join(clusters[start:cursor_cluster])) >= columns
-            and start < cursor_cluster
-        ):
+        while start < cursor_cluster and prefix[cursor_cluster] - prefix[start] >= columns:
             start += 1
         end = cursor_cluster
-        while end < len(clusters) and display_width("".join(clusters[start : end + 1])) <= columns:
+        while end < len(clusters) and prefix[end + 1] - prefix[start] <= columns:
             end += 1
         text = "".join(clusters[start:end])
-        column = display_width("".join(clusters[start:cursor_cluster]))
+        column = prefix[cursor_cluster] - prefix[start]
         if column >= columns:
             column = max(columns - 1, 0)
         return text, column
@@ -277,17 +278,17 @@ def wrap_display(text: str, width: int) -> list[str]:
     if width == 0:
         return [text]
     lines: list[str] = []
-    current = ""
+    current: list[str] = []
     used = 0
     for cluster in graphemes(text):
-        cluster_width = display_width(cluster)
-        if current and used + cluster_width > width:
-            lines.append(current)
-            current = ""
+        size = cluster_width(cluster)
+        if current and used + size > width:
+            lines.append("".join(current))
+            current = []
             used = 0
-        current += cluster
-        used += cluster_width
-    lines.append(current)
+        current.append(cluster)
+        used += size
+    lines.append("".join(current))
     return lines
 
 
@@ -299,14 +300,14 @@ def _clock(seconds: float) -> str:
 def truncate_width(text: str, width: int) -> str:
     if width <= 0:
         return ""
-    if display_width(text) <= width:
-        return text
-    kept = ""
+    kept: list[str] = []
+    used = 0
     for cluster in graphemes(text):
-        if display_width(kept + cluster) > width:
-            break
-        kept += cluster
-    return kept
+        used += cluster_width(cluster)
+        if used > width:
+            return "".join(kept)
+        kept.append(cluster)
+    return text
 
 
 def offline_programs(station: str, day) -> list[Program]:
@@ -522,14 +523,15 @@ class Screen:
         elif key == "r":
             self._commit_search()
 
-    def keyword_preview(self) -> str | None:
+    def keyword_preview(self, rows: list[Program] | None = None) -> str | None:
         if self.area != "keyword":
             return None
         try:
             draft = self.committed.with_keyword(self.draft_keyword.value or None)
         except ValueError:
             draft = self.committed
-        count = sum(draft.matches(program) for program in self.visible())
+        visible = self.visible() if rows is None else rows
+        count = sum(draft.matches(program) for program in visible)
         full = f"表示中の一覧で一致 {count} 件（未確定）"
         short = f"一致 {count} 件"
         return full if display_width(full) <= self.width else short
@@ -559,7 +561,8 @@ class Screen:
         title = (
             "番組一覧"
             if compact
-            else self.keyword_preview() or f"番組一覧 一致{len(rows)} / 取得{len(self.programs)}枠"
+            else self.keyword_preview(rows)
+            or f"番組一覧 一致{len(rows)} / 取得{len(self.programs)}枠"
         )
         lines.append(truncate_width(title, self.width))
         footer = self._footer(compact)
@@ -605,8 +608,7 @@ class Screen:
         shown.extend("" for _ in range(self.height - len(shown)))
         return shown
 
-    def _scope(self) -> str:
-        rows = self.visible()
+    def _scope(self, rows: list[Program]) -> str:
         if not rows:
             return "指定なし"
         return rows[0].key.station_id
@@ -617,8 +619,8 @@ class Screen:
             return f"{mode} / オフライン確認"
         return mode
 
-    def _header(self, compact: bool, _rows: list[Program]) -> list[str]:
-        scope = self._scope()
+    def _header(self, compact: bool, rows: list[Program]) -> list[str]:
+        scope = self._scope(rows)
         day = broadcast_day(self.now)
         if compact:
             return [
