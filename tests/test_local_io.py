@@ -239,15 +239,34 @@ def test_probe_silent_streams_one_second_chunks_and_reports_every_five(monkeypat
 
     from radiko.output import OutputSummary, probe_silent
 
+    opened = []
     calls = []
     progress = []
 
-    def fake(samples, rate, channels, stop=None, paused=None, volume=100, step_hook=None):
-        calls.append(len(samples))
-        return OutputSummary(len(samples) // channels, rate, channels, "f32", 0)
+    class FakeStream:
+        def __init__(self):
+            self.frames = 0
 
-    monkeypatch.setattr("radiko.output.play_samples", fake)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def write(self, samples, volume=100):
+            calls.append(len(samples))
+            self.frames += len(samples) // 2
+
+        def summary(self):
+            return OutputSummary(self.frames, 48000, 2, "f32", 0)
+
+    def fake_open(*_args, **_kwargs):
+        opened.append(True)
+        return FakeStream()
+
+    monkeypatch.setattr("radiko.output.open_stream", fake_open)
     summary = probe_silent(7, threading.Event(), progress.append)
+    assert opened == [True]
     assert calls == [48000 * 2] * 7
     assert len(progress) == 1
     assert summary.frames == 7 * 48000
@@ -260,3 +279,32 @@ def test_null_sink_probe_counts_frames(monkeypatch, capsys):
     out, err = capsys.readouterr()
     assert "無音出力完了: 48000フレーム / 48000Hz / f32 / 2ch" in out
     assert err == ""
+
+
+def test_probe_silent_reuses_one_alsa_stream_for_all_chunks(monkeypatch):
+    import threading
+
+    import radiko.output as output
+
+    opened = []
+    closed = []
+
+    class FakeLibrary:
+        def snd_pcm_set_params(self, *args):
+            return 0
+
+    monkeypatch.setattr(output, "null_sink_enabled", lambda: False)
+    monkeypatch.setattr(output, "host_backend", lambda: "alsa")
+    monkeypatch.setattr(
+        output,
+        "_open_default",
+        lambda: opened.append(True) or (FakeLibrary(), object()),
+    )
+    monkeypatch.setattr(output, "_close", lambda _opened: closed.append(True))
+    monkeypatch.setattr(output, "_write_pcm", lambda *_args: None)
+    summary = output.probe_silent(3, threading.Event())
+    assert summary.frames == 3 * 48000
+    assert len(opened) == 1
+    assert len(closed) == 1
+
+

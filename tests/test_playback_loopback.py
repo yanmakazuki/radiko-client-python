@@ -351,6 +351,31 @@ def test_interactive_switch_rebuilds_playback_for_the_selected_station(tmp_path,
     assert report.reason in {"limit", "program-end"}
 
 
+def test_live_playback_keeps_one_output_stream_across_segments(tmp_path, monkeypatch, capsys):
+    import radiko.output as output
+
+    server = _serve()
+    _Handler.live = True
+    _env(monkeypatch, server, tmp_path)
+    opened = []
+    original = output.open_stream
+
+    def counted(*args, **kwargs):
+        opened.append((args[0], args[1]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(output, "open_stream", counted)
+    try:
+        code = main(["--data-dir", str(tmp_path), "play-live", "TBS", "--seconds", "3"])
+    finally:
+        server.shutdown()
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert _Handler.media_fetches >= 3
+    assert len(opened) == 1
+    assert opened[0][0] == 44100
+
+
 def test_segment_cancel_stops_before_claiming_playback(tmp_path, monkeypatch, capsys):
     server = _serve()
     stop = threading.Event()

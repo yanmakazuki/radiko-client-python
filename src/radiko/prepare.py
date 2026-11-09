@@ -762,7 +762,7 @@ def _play_station(
     on_notice=None,
     on_ready=None,
 ) -> PlayReport:
-    from radiko.output import play_samples
+    from radiko.output import open_stream
     from radiko.stream import ProbeError
 
     program, headers, _area, _outside, urls = prepare(
@@ -800,6 +800,28 @@ def _play_station(
     if position:
         pending = (program.start + timedelta(seconds=position), position)
         media_seconds = position
+    stream = None
+    stop_playback = _StopView(
+        lambda: cancelled() or control.stopped or control.selected is not None
+    )
+
+    def close_stream() -> None:
+        nonlocal stream, played_frames, underrun_frames
+        if stream is not None:
+            summary = stream.summary()
+            played_frames += summary.frames
+            underrun_frames += summary.underrun_frames
+            stream.close()
+            stream = None
+
+    def emit(piece, rate: int, channels: int) -> None:
+        nonlocal stream
+        if not len(piece):
+            return
+        if stream is None or (stream.rate, stream.input_channels) != (rate, channels):
+            close_stream()
+            stream = open_stream(rate, channels, stop_playback, step_hook=drain)
+        stream.write(piece, volume=control.volume)
 
     def drain(*_args) -> None:
         while True:
@@ -826,6 +848,7 @@ def _play_station(
         if control.selected is not None:
             new_mode, new_station, new_cursor, new_offset = control.selected
             control.selected = None
+            close_stream()
             return _play_station(
                 new_station,
                 new_mode,
@@ -961,9 +984,6 @@ def _play_station(
             piece, frame_count = trimmed
             media_seconds = target_seconds
             pending = None
-        stop_piece = _StopView(
-            lambda: cancelled() or control.stopped or control.selected is not None
-        )
         if limit is not None:
             room = limit - media_seconds
             if room <= 0:
@@ -972,23 +992,13 @@ def _play_station(
             max_frames = int(room * rate)
             if frame_count > max_frames:
                 piece = piece[: max_frames * channels]
-                summary = play_samples(
-                    piece, rate, channels, stop_piece, volume=control.volume, step_hook=drain
-                )
-                played_frames += summary.frames
-                underrun_frames += summary.underrun_frames
-                rate, channels = summary.sample_rate, summary.channels
+                emit(piece, rate, channels)
                 taken += 1
                 sequence += 1
                 reason = "limit"
                 break
-        if piece:
-            summary = play_samples(
-                piece, rate, channels, stop_piece, volume=control.volume, step_hook=drain
-            )
-            played_frames += summary.frames
-            underrun_frames += summary.underrun_frames
-            rate, channels = summary.sample_rate, summary.channels
+        if len(piece):
+            emit(piece, rate, channels)
         media_seconds += len(piece) / channels / rate
         taken += 1
         sequence += 1
@@ -998,6 +1008,7 @@ def _play_station(
             break
     if cancelled():
         reason = "cancelled"
+    close_stream()
     return PlayReport(
         reason,
         played_frames,

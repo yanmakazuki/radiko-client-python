@@ -12,9 +12,10 @@ import ctypes.util
 import os
 import sys
 import threading
-from array import array
 from contextlib import contextmanager
 from dataclasses import dataclass
+
+import numpy as np
 
 PCM_RATE_MIN = 8000
 PCM_RATE_MAX = 192000
@@ -114,7 +115,7 @@ def _supports_f32(rate: int, channels: int) -> bool | None:
         return None
     library, handle = opened
     try:
-        with _silence_stderr():
+        with _silence_alsa(library):
             result = library.snd_pcm_set_params(handle, 14, 3, channels, rate, 0, 100000)
         return result >= 0
     finally:
@@ -144,10 +145,140 @@ def inspect_default_output(rate: int) -> OutputInfo:
     return OutputInfo("default", rate, sample_format, channels, "")
 
 
+class OutputStream:
+    """1回開いた出力を複数のチャンクで使い回す。"""
+
+    def __init__(self, rate, channels, sample_format, out_channels) -> None:
+        self.rate = rate
+        self.channels = out_channels
+        self.input_channels = channels
+        self.sample_format = sample_format
+        self.frames = 0
+        self.underruns = 0
+
+    def write(self, samples, volume: int = 100) -> None:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass
+
+    def summary(self) -> OutputSummary:
+        return OutputSummary(
+            self.frames, self.rate, self.channels, self.sample_format, self.underruns
+        )
+
+    def __enter__(self) -> OutputStream:
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.close()
+
+
+class _NullStream(OutputStream):
+    def __init__(self, rate, channels, stop, paused, step_hook) -> None:
+        super().__init__(rate, channels, "f32", channels)
+        self.stop = stop or threading.Event()
+        self.paused = paused or threading.Event()
+        self.step_hook = step_hook
+
+    def write(self, samples, volume: int = 100) -> None:
+        array = _prepare(samples, volume)
+        frames = array.size // self.input_channels
+        quantum = max(self.rate // 50, 1)
+        cursor = 0
+        while cursor < frames:
+            if self.step_hook is not None:
+                self.step_hook(self.frames)
+            if self.stop.is_set() or self.paused.is_set():
+                break
+            step = min(quantum, frames - cursor)
+            cursor += step
+            self.frames += step
+
+
+class _AlsaStream(OutputStream):
+    def __init__(self, rate, channels, stop, paused, step_hook) -> None:
+        opened = _open_default()
+        if opened is None:
+            raise OutputError("none")
+        self.opened = opened
+        chosen = _select_format(opened, rate)
+        if chosen is None:
+            _close(opened)
+            raise OutputError("device", inspect_default_output(rate).mismatch)
+        sample_format, out_channels = chosen
+        super().__init__(rate, channels, sample_format, out_channels)
+        self.stop = stop or threading.Event()
+        self.paused = paused or threading.Event()
+        self.step_hook = step_hook
+        self.quantum = max(rate // 50, 1)
+
+    def write(self, samples, volume: int = 100) -> None:
+        array = _prepare(samples, volume)
+        frames = array.size // self.input_channels
+        cursor = 0
+        while cursor < frames:
+            if self.step_hook is not None:
+                self.step_hook(self.frames)
+            if self.stop.is_set():
+                break
+            step = min(self.quantum, frames - cursor)
+            if self.paused.is_set():
+                _write_silence(self.opened, self.sample_format, self.channels, step)
+                continue
+            block = array[cursor * self.input_channels : (cursor + step) * self.input_channels]
+            if self.channels != self.input_channels:
+                block = _remix(block, self.input_channels, self.channels, step)
+            _write_pcm(self.opened, block, self.sample_format, self.channels)
+            cursor += step
+            self.frames += step
+
+    def close(self) -> None:
+        _close(self.opened)
+
+
+class _CoreAudioStream(OutputStream):
+    def __init__(self, rate, channels, stop, step_hook) -> None:
+        from radiko.coreaudio import Stream
+        from radiko.coreaudio import inspect as inspect_coreaudio
+
+        info = inspect_coreaudio(rate)
+        if info.sample_format is None or info.channels is None:
+            raise OutputError("device", info.mismatch)
+        self.stream = Stream(rate, info.channels, stop, step_hook)
+        super().__init__(rate, channels, "f32", info.channels)
+
+    def write(self, samples, volume: int = 100) -> None:
+        self.stream.write(samples, volume)
+        self.frames = self.stream.queued_frames
+
+    def close(self) -> None:
+        self.stream.close()
+        self.frames = self.stream.played_frames
+        self.underruns = 0
+
+
+def open_stream(rate: int, channels: int, stop=None, paused=None, step_hook=None) -> OutputStream:
+    if null_sink_enabled():
+        return _NullStream(rate, channels, stop, paused, step_hook)
+    backend = host_backend()
+    if backend == "coreaudio":
+        return _CoreAudioStream(rate, channels, stop, step_hook)
+    if backend == "alsa":
+        return _AlsaStream(rate, channels, stop, paused, step_hook)
+    raise OutputError("none")
+
+
 def probe_tone(seconds: int) -> OutputSummary:
     if not 1 <= seconds <= 10:
         raise OutputError("pcm", "出力用PCMまたは再生時間が不正です")
-    return _play_generated(seconds, tone=True)
+    rate = 48000
+    channels = 2
+    positions = np.arange(rate * seconds, dtype=np.float64)
+    values = (0.2 * np.sin(2 * np.pi * 440 * positions / rate)).astype(np.float32)
+    samples = np.repeat(values, channels)
+    summary = play_samples(samples, rate, channels)
+    return summary
 
 
 def probe_silent(seconds: int, stop, on_progress=None) -> OutputSummary:
@@ -155,22 +286,19 @@ def probe_silent(seconds: int, stop, on_progress=None) -> OutputSummary:
         raise OutputError("device", "無音の出力診断は1〜1800秒で指定してください")
     rate = 48000
     channels = 2
-    frames = 0
-    underruns = 0
-    for index in range(seconds):
-        if stop.is_set():
-            break
-        summary = play_samples([0.0] * (rate * channels), rate, channels, stop)
-        frames += summary.frames
-        underruns += summary.underrun_frames
-        rate, channels = summary.sample_rate, summary.channels
-        if on_progress is not None and (index + 1) % 5 == 0:
-            on_progress(OutputSummary(frames, rate, channels, "f32", underruns))
-    return OutputSummary(frames, rate, channels, "f32", underruns)
+    with open_stream(rate, channels, stop) as stream:
+        for index in range(seconds):
+            if stop.is_set():
+                break
+            stream.write(np.zeros(rate * channels, dtype=np.float32))
+            if on_progress is not None and (index + 1) % 5 == 0:
+                on_progress(stream.summary())
+        summary = stream.summary()
+    return summary
 
 
 def play_samples(
-    samples: list[float],
+    samples: list[float] | np.ndarray,
     rate: int,
     channels: int,
     stop=None,
@@ -179,100 +307,26 @@ def play_samples(
     step_hook=None,
 ) -> OutputSummary:
     """インターリーブされた f32 を出す。一時停止中はメディア位置を進めない。"""
-    stop = stop or threading.Event()
-    paused = paused or threading.Event()
-    info = inspect_default_output(rate)
-    if info.sample_format is None or info.channels is None:
-        raise OutputError("device", info.mismatch)
+    with open_stream(rate, channels, stop, paused, step_hook) as stream:
+        stream.write(samples, volume)
+        return stream.summary()
+
+
+def _prepare(samples, volume: int) -> np.ndarray:
+    array = np.asarray(samples, dtype=np.float32).reshape(-1)
     gain = max(0, min(volume, 100)) / 100
-    scaled = [sample * gain for sample in samples]
-    return _consume(scaled, rate, channels, info, stop, paused, step_hook)
+    return array if gain == 1.0 else array * gain
 
 
-def _play_generated(seconds: int, tone: bool, stop=None, on_progress=None) -> OutputSummary:
-    rate = 48000
-    channels = 2
-    total = rate * seconds
-    samples: list[float] = []
-    if tone:
-        for index in range(total):
-            value = 0.2 if (index // (rate // 440)) % 2 == 0 else -0.2
-            samples.extend([value, value])
+def _remix(block, src: int, dst: int, frames: int) -> np.ndarray:
+    array = np.asarray(block, dtype=np.float32).reshape(frames, src)
+    if dst == 1:
+        output = array.mean(axis=1, dtype=np.float32)
+    elif src == 1:
+        output = np.repeat(array, 2, axis=1)
     else:
-        samples = [0.0] * (total * channels)
-    summary = play_samples(samples, rate, channels, stop)
-    if on_progress:
-        on_progress(summary)
-    return summary
-
-
-def _consume(
-    samples, rate, channels, info: OutputInfo, stop, paused, step_hook=None
-) -> OutputSummary:
-    frames = len(samples) // channels
-    underruns = 0
-    played = 0
-    quantum = max(rate // 50, 1)
-    cursor = 0
-    if null_sink_enabled():
-        while cursor < frames:
-            if step_hook is not None:
-                step_hook(played)
-            if stop.is_set():
-                break
-            if paused.is_set():
-                break
-            step = min(quantum, frames - cursor)
-            cursor += step
-            played += step
-        return OutputSummary(
-            played, rate, info.channels or channels, info.sample_format or "f32", underruns
-        )
-    if host_backend() == "coreaudio":
-        from radiko.coreaudio import play as play_coreaudio
-
-        return play_coreaudio(samples, rate, channels, info, stop, step_hook)
-    opened = _open_default()
-    if opened is None:
-        raise OutputError("none")
-    try:
-        chosen = _select_format(opened, rate)
-        if chosen is None:
-            raise OutputError("device", inspect_default_output(rate).mismatch)
-        sample_format, out_channels = chosen
-        while cursor < frames:
-            if step_hook is not None:
-                step_hook(played)
-            if stop.is_set():
-                break
-            step = min(quantum, frames - cursor)
-            if paused.is_set():
-                _write_silence(opened, sample_format, out_channels, step)
-                continue
-            block = samples[cursor * channels : (cursor + step) * channels]
-            if out_channels != channels:
-                block = _remix(block, channels, out_channels, step)
-            _write_pcm(opened, block, sample_format, out_channels)
-            cursor += step
-            played += step
-    finally:
-        _close(opened)
-    return OutputSummary(
-        played, rate, info.channels or channels, info.sample_format or "f32", underruns
-    )
-
-
-def _remix(block: list[float], src: int, dst: int, frames: int) -> list[float]:
-    output = []
-    for index in range(frames):
-        frame = block[index * src : (index + 1) * src]
-        if dst == 1:
-            output.append(sum(frame) / len(frame))
-        elif src == 1:
-            output.extend([frame[0], frame[0]])
-        else:
-            output.extend(frame[:dst])
-    return output
+        output = array[:, :dst]
+    return np.ascontiguousarray(output.reshape(-1), dtype=np.float32)
 
 
 def _alsa():
@@ -312,7 +366,7 @@ def _open_default():
     if library is None:
         return None
     handle = ctypes.c_void_p()
-    with _silence_stderr():
+    with _silence_alsa(library):
         code = library.snd_pcm_open(ctypes.byref(handle), b"default", 0, 0)
     if code < 0 or not handle.value:
         return None
@@ -328,36 +382,56 @@ def _select_format(opened, rate: int):
     library, handle = opened
     for name, code in _FORMATS:
         for channels in (2, 1):
-            with _silence_stderr():
+            with _silence_alsa(library):
                 result = library.snd_pcm_set_params(handle, code, 3, channels, rate, 0, 100000)
             if result >= 0:
                 return name, channels
     return None
 
 
-def _write_pcm(opened, samples: list[float], sample_format: str, channels: int) -> None:
+def _write_pcm(opened, samples, sample_format: str, channels: int) -> None:
     library, handle = opened
+    array = np.asarray(samples, dtype=np.float32).reshape(-1)
     if sample_format == "f32":
-        raw = array("f", samples)
+        payload = np.ascontiguousarray(array, dtype=np.float32)
     elif sample_format == "i16":
-        raw = array("h", [max(-32768, min(32767, int(sample * 32767))) for sample in samples])
+        payload = np.clip(array * 32767, -32768, 32767).astype(np.int16)
     else:
-        raw = array(
-            "i", [max(-2147483648, min(2147483647, int(sample * 2147483647))) for sample in samples]
-        )
-    frames = len(samples) // channels
-    written = library.snd_pcm_writei(handle, raw.tobytes(), frames)
+        payload = np.clip(array * 2147483647, -2147483648, 2147483647).astype(np.int32)
+    frames = array.size // channels
+    written = library.snd_pcm_writei(handle, payload.ctypes.data_as(ctypes.c_void_p), frames)
     if written < 0:
         raise OutputError("device")
 
 
 def _write_silence(opened, sample_format: str, channels: int, frames: int) -> None:
-    _write_pcm(opened, [0.0] * (frames * channels), sample_format, channels)
+    _write_pcm(opened, np.zeros(frames * channels, dtype=np.float32), sample_format, channels)
+
+
+_ALSA_ERROR = ctypes.CFUNCTYPE(
+    None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p
+)
+
+
+def _alsa_noop(*_args) -> None:
+    return
+
+
+_ALSA_ERROR_HANDLER = _ALSA_ERROR(_alsa_noop)
 
 
 @contextmanager
-def _silence_stderr():
+def _silence_alsa(library):
     if show_alsa_logs():
+        yield
+        return
+    setter = getattr(library, "snd_lib_error_set_handler", None)
+    if setter is not None:
+        signature = getattr(setter, "argtypes", None)
+        if signature is None or signature != [_ALSA_ERROR]:
+            setter.argtypes = [_ALSA_ERROR]
+            setter.restype = ctypes.c_int
+        setter(_ALSA_ERROR_HANDLER)
         yield
         return
     saved = os.dup(2)
