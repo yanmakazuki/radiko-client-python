@@ -280,3 +280,126 @@ def test_help_text_is_cached_and_render_calls_visible_once(monkeypatch):
     assert calls["count"] == 1
     assert screen.keyword_preview() is not None
     assert calls["count"] == 2
+
+
+# --- Issue #8: MP4 / ADTS パーサ ---
+
+import tracemalloc  # noqa: E402
+
+from radiko.fragmented import _atoms, box, words  # noqa: E402
+from radiko.fragmented import _word as atom_word  # noqa: E402
+from radiko.media import _parse_adts, audio_offset, split_adts, validate_mp4  # noqa: E402
+
+
+def adts_frame(payload: bytes, rate_index: int = 4, channels: int = 2) -> bytes:
+    length = 7 + len(payload)
+    header = bytearray(7)
+    header[0] = 0xFF
+    header[1] = 0xF1
+    header[2] = (1 << 6) | (rate_index << 2) | ((channels >> 2) & 1)
+    header[3] = ((channels & 3) << 6) | ((length >> 11) & 3)
+    header[4] = (length >> 3) & 0xFF
+    header[5] = ((length & 7) << 5) | 0x1F
+    header[6] = 0xFC
+    return bytes(header) + payload
+
+
+def legacy_split_adts(data: bytes) -> list[tuple[int, int, int, bytes]]:
+    remaining = data[audio_offset(data) :]
+    frames = []
+    while remaining:
+        header = _parse_adts(remaining)
+        frames.append(
+            (
+                header["object_type"],
+                header["sample_rate"],
+                header["channels"],
+                remaining[header["header_len"] : header["frame_length"]],
+            )
+        )
+        remaining = remaining[header["frame_length"] :]
+    return frames
+
+
+def legacy_atoms(data: bytes) -> list[tuple[bytes, int, int, bytes]]:
+    result = []
+    at = 0
+    while at < len(data):
+        rest = data[at:]
+        size = atom_word(rest, 0)
+        kind = rest[4:8]
+        if size == 0:
+            size, header = len(rest), 8
+        elif size == 1:
+            size = (atom_word(rest, 8) << 32) | atom_word(rest, 12)
+            header = 16
+        else:
+            header = 8
+        result.append((kind, at, header, rest[header:size]))
+        at += size
+    return result
+
+
+def test_split_adts_matches_legacy_and_returns_bytes_payloads():
+    frames = [
+        adts_frame(b"\x01" * 5),
+        adts_frame(b"\x02" * 37),
+        adts_frame(b"\x03" * 1),
+        adts_frame(b"\x04" * 257),
+    ]
+    data = b"".join(frames)
+    parsed = split_adts(data, lambda: False)
+    expected = legacy_split_adts(data)
+    assert [
+        (frame.object_type, frame.sample_rate, frame.channels, frame.payload) for frame in parsed
+    ] == expected
+    assert all(isinstance(frame.payload, bytes) for frame in parsed)
+
+    skipping = b"ID3\x04\x00\x00" + bytes([0, 0, 0, 16]) + b"\x00" * 16 + data
+    assert [frame.payload for frame in split_adts(skipping, lambda: False)] == [
+        item[3] for item in expected
+    ]
+
+
+def test_atoms_matches_legacy_for_nested_and_large_boxes():
+    large_64 = (1).to_bytes(4, "big") + b"mdat" + (23).to_bytes(8, "big") + b"payload"
+    data = (
+        box(b"ftyp", b"isom")
+        + box(b"moov", box(b"trak", words(0, 1)) + box(b"free", b""))
+        + large_64
+        + box(b"skip", b"x")
+    )
+    parsed = _atoms(data)
+    expected = legacy_atoms(data)
+    assert [(item.kind, item.offset, item.header, bytes(item.data)) for item in parsed] == expected
+    assert parsed[0].kind == b"ftyp"
+    assert parsed[2].header == 16
+
+
+def test_mp4_walk_does_not_copy_the_remaining_segment():
+    payload = b"\x00" * (4 * 1024 * 1024)
+    data = box(b"ftyp", b"isom") + (len(payload) + 8).to_bytes(4, "big") + b"mdat" + payload
+    tracemalloc.start()
+    try:
+        validate_mp4(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 512 * 1024
+
+
+def test_atoms_does_not_copy_the_remaining_segment():
+    payload = b"\x00" * (4 * 1024 * 1024)
+    data = (len(payload) + 8).to_bytes(4, "big") + b"mdat" + payload
+    tracemalloc.start()
+    try:
+        atoms = _atoms(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(atoms) == 1
+    assert peaks_below(peak)
+
+
+def peaks_below(peak: int) -> bool:
+    return peak < 512 * 1024
