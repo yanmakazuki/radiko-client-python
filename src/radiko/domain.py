@@ -96,7 +96,7 @@ class Program:
     tags: list[str] = field(default_factory=list)
     program_genres: list[Classification] = field(default_factory=list)
     personality_genres: list[Classification] = field(default_factory=list)
-    _search_text: str | None = field(default=None, repr=False, compare=False)
+    _search_text: str | None = field(default=None, repr=False, compare=False, init=False)
 
     @property
     def search_text(self) -> str:
@@ -186,6 +186,12 @@ class Filter:
         default_factory=frozenset, repr=False, compare=False
     )
 
+    def __post_init__(self) -> None:
+        self.program_genre_set = frozenset(self.program_genres)
+        self.personality_genre_set = frozenset(self.personality_genres)
+        if self.keyword is not None and self.keyword_lowercase is None:
+            self.keyword_lowercase = self.keyword.lower()
+
     @classmethod
     def create(
         cls,
@@ -208,8 +214,6 @@ class Filter:
             keyword=keyword_text,
             keyword_lowercase=None if keyword_text is None else keyword_text.lower(),
         )
-        result.program_genre_set = frozenset(result.program_genres)
-        result.personality_genre_set = frozenset(result.personality_genres)
         return result
 
     def with_keyword(self, keyword: str | None) -> Filter:

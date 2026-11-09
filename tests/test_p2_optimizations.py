@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
 
@@ -14,7 +15,7 @@ from radiko.catalog import (
     parse_clock,
     parse_programs,
 )
-from radiko.domain import VALID_AREAS, Filter, Program, ProgramKey
+from radiko.domain import VALID_AREAS, Classification, Filter, Program, ProgramKey
 from radiko.text import clean_text, has_control
 
 JST = timezone(timedelta(hours=9))
@@ -403,3 +404,62 @@ def test_atoms_does_not_copy_the_remaining_segment():
 
 def peaks_below(peak: int) -> bool:
     return peak < 512 * 1024
+
+
+def _cursor_is_boundary(editor: LineEditor) -> bool:
+    points = [0]
+    for cluster in graphemes(editor.value):
+        points.append(points[-1] + len(cluster.encode()))
+    return editor.cursor in points
+
+
+def test_line_editor_snaps_cursor_after_inserting_combining_marks():
+    editor = LineEditor.new("", 1024)
+    for key in ["\u0301", "left", "\u0301"]:
+        editor.handle(key)
+        assert _cursor_is_boundary(editor)
+    assert editor.value == "\u0301\u0301"
+    assert editor.cursor == 0
+
+    sequences = [
+        ["a", "left", "\u0301"],
+        ["\u0301", "right", "\u0301", "backspace"],
+        ["あ", "\u0301", "left", "\u0301"],
+        ["あ", "left", "a", "left", "\u0301", "delete"],
+    ]
+    for keys in sequences:
+        editor = LineEditor.new("", 1024)
+        for key in keys:
+            editor.handle(key)
+            assert _cursor_is_boundary(editor), (keys, key, editor.value, editor.cursor)
+
+
+def test_filter_direct_construction_populates_caches():
+    start = datetime(2026, 10, 15, 10, 0, tzinfo=JST)
+    program = Program(
+        ProgramKey("TBS", start),
+        "id",
+        start + timedelta(hours=1),
+        "題名",
+        performer="人物",
+        program_genres=[Classification("B", "分類B")],
+    )
+    direct = Filter(program_genres=["A"], personality_genres=["P"], keyword="Foo")
+    assert direct.program_genre_set == frozenset({"A"})
+    assert direct.personality_genre_set == frozenset({"P"})
+    assert direct.keyword_lowercase == "foo"
+    assert direct.matches(program) is False
+    assert Filter(program_genres=["B"]).matches(program) is True
+    assert Filter(keyword="題名").matches(program) is True
+
+
+def test_program_replace_recomputes_search_text():
+    start = datetime(2026, 10, 15, 10, 0, tzinfo=JST)
+    program = Program(ProgramKey("TBS", start), "id", start + timedelta(hours=1), "旧題名")
+    assert "旧題名" in program.search_text
+    replaced = dataclasses.replace(program, title="新題名")
+    assert replaced._search_text is None
+    assert "新題名" in replaced.search_text
+    assert "旧題名" not in replaced.search_text
+    assert "_search_text" not in repr(replaced)
+    assert replaced == dataclasses.replace(program, title="新題名")

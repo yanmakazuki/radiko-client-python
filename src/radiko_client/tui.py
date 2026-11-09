@@ -159,7 +159,7 @@ class LineEditor:
 
     def handle(self, key: str) -> None:
         points = _boundaries(self.value)
-        self.cursor = min(points, key=lambda point: (abs(point - self.cursor), point))
+        self.cursor = _snap_points(points, self.cursor)
         raw = self.value.encode()
         index = points.index(self.cursor)
         if key == "ctrl-u":
@@ -187,6 +187,10 @@ class LineEditor:
             or (len(key) == 1 and key not in {"\n", "\t"} and key.isprintable())
         ):
             self._insert(key)
+        # 結合文字の挿入などでクラスタ内部を指した場合も、旧実装と同じ境界へ戻す。
+        self.cursor = _snap_points(
+            _boundaries(self.value), min(self.cursor, len(self.value.encode()))
+        )
 
     def _insert(self, char: str) -> None:
         if len(self.value.encode()) + len(char.encode()) > self.byte_limit:
@@ -232,9 +236,13 @@ def _boundaries(value: str) -> list[int]:
     return points
 
 
+def _snap_points(points: list[int], cursor: int) -> int:
+    return min(points, key=lambda point: (abs(point - cursor), point))
+
+
 def _snap(value: str, cursor: int) -> int:
     points = _boundaries(value)
-    return min(points, key=lambda point: (abs(point - cursor), point))
+    return _snap_points(points, cursor)
 
 
 def _previous(value: str, cursor: int) -> int:
