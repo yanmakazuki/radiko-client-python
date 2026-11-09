@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from radiko.text import has_control
 
 JST = timezone(timedelta(hours=9))
+VALID_AREAS = frozenset(f"JP{number}" for number in range(1, 48))
 
 
 def parse_jst(text: str) -> datetime:
@@ -95,6 +96,16 @@ class Program:
     tags: list[str] = field(default_factory=list)
     program_genres: list[Classification] = field(default_factory=list)
     personality_genres: list[Classification] = field(default_factory=list)
+    _search_text: str | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def search_text(self) -> str:
+        """検索用に小文字化した本文。初回だけ生成して再利用する。"""
+        if self._search_text is None:
+            self._search_text = "\n".join(
+                (self.title, self.performer, self.description, self.info, *self.tags)
+            ).lower()
+        return self._search_text
 
 
 @dataclass(frozen=True)
@@ -170,6 +181,10 @@ class Filter:
     unclassified_personality: bool = False
     keyword: str | None = None
     keyword_lowercase: str | None = field(default=None, repr=False, compare=False)
+    program_genre_set: frozenset[str] = field(default_factory=frozenset, repr=False, compare=False)
+    personality_genre_set: frozenset[str] = field(
+        default_factory=frozenset, repr=False, compare=False
+    )
 
     @classmethod
     def create(
@@ -193,6 +208,8 @@ class Filter:
             keyword=keyword_text,
             keyword_lowercase=None if keyword_text is None else keyword_text.lower(),
         )
+        result.program_genre_set = frozenset(result.program_genres)
+        result.personality_genre_set = frozenset(result.personality_genres)
         return result
 
     def with_keyword(self, keyword: str | None) -> Filter:
@@ -206,25 +223,15 @@ class Filter:
 
     def matches(self, program: Program) -> bool:
         return (
-            _matches_class(program.program_genres, self.program_genres, self.unclassified_program)
+            _matches_class(
+                program.program_genres, self.program_genre_set, self.unclassified_program
+            )
             and _matches_class(
                 program.personality_genres,
-                self.personality_genres,
+                self.personality_genre_set,
                 self.unclassified_personality,
             )
-            and (
-                self.keyword_lowercase is None
-                or any(
-                    self.keyword_lowercase in text.lower()
-                    for text in (
-                        program.title,
-                        program.performer,
-                        program.description,
-                        program.info,
-                        *program.tags,
-                    )
-                )
-            )
+            and (self.keyword_lowercase is None or self.keyword_lowercase in program.search_text)
         )
 
     def to_dict(self) -> dict:
@@ -272,7 +279,7 @@ class Filter:
         )
 
 
-def _matches_class(items: list[Classification], ids: list[str], empty: bool) -> bool:
+def _matches_class(items: list[Classification], ids: frozenset[str], empty: bool) -> bool:
     if not ids and not empty:
         return True
     if empty and not items:
@@ -346,7 +353,7 @@ def _valid_station(station_id: str) -> bool:
 
 
 def _valid_area(area: str) -> bool:
-    return any(area == f"JP{number}" for number in range(1, 48))
+    return area in VALID_AREAS
 
 
 @dataclass

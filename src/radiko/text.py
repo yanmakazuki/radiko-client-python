@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 import regex
@@ -11,6 +12,21 @@ _ZERO_WIDTH = {
     "Me",
     "Cf",
 }
+
+
+def _control_table() -> dict[int, str | None]:
+    """Cc（U+0000〜U+001F, U+007F〜U+009F）だけを一括変換する表。"""
+    table: dict[int, str | None] = {}
+    for code in range(0x00, 0xA0):
+        char = chr(code)
+        if unicodedata.category(char) != "Cc":
+            continue
+        table[code] = " " if char.isspace() else None
+    return table
+
+
+_CONTROL_TABLE = _control_table()
+_CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def graphemes(text: str) -> list[str]:
@@ -54,16 +70,8 @@ def _is_zero(char: str) -> bool:
 
 def clean_text(text: str) -> str:
     """空白は一つに畳み、Cc の制御文字は捨てる。"""
-    cleaned = []
-    for char in text:
-        if char.isspace():
-            cleaned.append(" ")
-        elif unicodedata.category(char) == "Cc":
-            continue
-        else:
-            cleaned.append(char)
-    return " ".join("".join(cleaned).split())
+    return " ".join(text.translate(_CONTROL_TABLE).split())
 
 
 def has_control(text: str) -> bool:
-    return any(unicodedata.category(char) == "Cc" for char in text)
+    return _CONTROL_PATTERN.search(text) is not None
