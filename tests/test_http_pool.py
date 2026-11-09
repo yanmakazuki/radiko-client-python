@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from radiko.catalog import CatalogError
+from radiko.catalog import CatalogError, decode_body
 from radiko.http_client import catalog_fetch, stream_get
 
 
@@ -31,9 +31,17 @@ class _Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/close":
             self.close_connection = True
             self._send(b"closed", {"Connection": "close"})
+        elif parsed.path == "/silent-close":
+            self.close_connection = True
+            self._send(b"silent")
         else:
             value = parse_qs(parsed.query).get("i", ["ok"])[0]
             self._send(value.encode())
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        self._send(b"posted")
 
     def _send(self, body: bytes, headers: dict[str, str] | None = None):
         self.send_response(200)
@@ -116,3 +124,18 @@ def test_catalog_fetch_decompresses_gzip_and_rejects_a_bomb():
         assert raised.value.code == "large"
     finally:
         server.shutdown()
+
+
+def test_gzip_bomb_expansion_is_bounded_by_tracemalloc():
+    import tracemalloc
+
+    bomb = gzip.compress(b"A" * (64 * 1024 * 1024), compresslevel=9)
+    tracemalloc.start()
+    try:
+        with pytest.raises(CatalogError) as raised:
+            decode_body(bomb, "gzip")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert raised.value.code == "large"
+    assert peak < 8 * 1024 * 1024
