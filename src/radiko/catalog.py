@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import gzip
 import os
 import threading
 import xml.etree.ElementTree as ET
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -419,14 +419,37 @@ def decode_body(data: bytes, encoding: str | None) -> bytes:
     if encoding in {None, "identity"}:
         return data
     if encoding == "gzip":
-        try:
-            output = gzip.decompress(data)
-        except (OSError, EOFError, gzip.BadGzipFile) as error:
-            raise CatalogError("xml") from error
-        if len(output) > MAX_SCHEDULE_BYTES:
-            raise CatalogError("large")
-        return output
+        return _gunzip_bounded(data)
     raise CatalogError("xml")
+
+
+def _gunzip_bounded(data: bytes) -> bytes:
+    """上限を超えた時点で展開を止め、4MB 以上のバッファを確保しない。"""
+    if not data:
+        raise CatalogError("xml")
+    output = bytearray()
+    remaining = data
+    while remaining:
+        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        pending = remaining
+        while True:
+            room = MAX_SCHEDULE_BYTES + 1 - len(output)
+            if room <= 0:
+                raise CatalogError("large")
+            try:
+                chunk = decompressor.decompress(pending, min(room, 1024 * 1024))
+            except zlib.error as error:
+                raise CatalogError("xml") from error
+            if len(output) + len(chunk) > MAX_SCHEDULE_BYTES:
+                raise CatalogError("large")
+            output.extend(chunk)
+            pending = decompressor.unconsumed_tail
+            if decompressor.eof:
+                remaining = decompressor.unused_data
+                break
+            if not pending:
+                raise CatalogError("xml")
+    return bytes(output)
 
 
 def acquire_range(

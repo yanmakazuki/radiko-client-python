@@ -1370,56 +1370,39 @@ def _refresh_auth(screen: Screen) -> None:
 
 
 def _fetch_programs(criteria: SearchCriteria, cancel) -> dict:
-    from radiko.catalog import CatalogClient, CatalogError
+    from radiko.catalog import CatalogClient, acquire_range, acquire_stations
     from radiko.http_client import catalog_fetch
 
-    def fetch(url: str) -> bytes:
-        if cancel.is_set():
-            raise CatalogError("cancelled")
-        return catalog_fetch(url)
-
-    client = CatalogClient(fetch)
-    programs: list[Program] = []
-    invalid = 0
-    area_failures: list[tuple[str, str]] = []
-    schedule_failures: list[tuple[str, str, str]] = []
+    client = CatalogClient(catalog_fetch)
     scope = criteria.scope
     if scope.kind == "station" and isinstance(scope.value, str):
-        stations = [scope.value]
-        areas: list[str] = []
-    elif scope.kind == "areas":
-        areas = list(scope.value or [])
-        stations = []
+        report = acquire_stations(
+            client, [scope.value], criteria.range, cancel, lambda _progress: None
+        )
     else:
-        areas = [f"JP{number}" for number in range(1, 48)]
-        stations = []
-    discovered: list[str] = []
-    for area in areas:
-        if cancel.is_set():
-            raise CatalogError("cancelled")
-        try:
-            found = client.stations(area)
-        except CatalogError as error:
-            area_failures.append((area, str(error)))
-            continue
-        for station in found:
-            if station.id not in discovered:
-                discovered.append(station.id)
-    targets = stations or discovered
-    for station in targets:
-        for day in criteria.range.days:
-            if cancel.is_set():
-                raise CatalogError("cancelled")
-            try:
-                listed = client.programs(station, day)
-            except CatalogError as error:
-                schedule_failures.append((station, day.strftime("%Y%m%d"), str(error)))
-                continue
-            programs.extend(listed.programs)
-            invalid += listed.invalid_count
-    visible = [program for program in programs if criteria.filter.matches(program)]
+        if scope.kind == "areas":
+            areas = list(scope.value or [])
+        else:
+            areas = [f"JP{number}" for number in range(1, 48)]
+        report = acquire_range(client, areas, criteria.range, cancel, lambda _progress: None)
+    programs = [
+        program
+        for listing in report.lists
+        for program in listing.programs
+        if criteria.filter.matches(program)
+    ]
+    invalid = sum(listing.invalid_count for listing in report.lists)
+    area_failures = [(failure.target, str(failure.error)) for failure in report.area_failures]
+    schedule_failures = [
+        (
+            failure.target,
+            failure.day.strftime("%Y%m%d") if failure.day else "",
+            str(failure.error),
+        )
+        for failure in report.schedule_failures
+    ]
     return {
-        "programs": visible,
+        "programs": programs,
         "invalid": invalid,
         "area_failures": area_failures,
         "schedule_failures": schedule_failures,
