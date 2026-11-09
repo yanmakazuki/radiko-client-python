@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from urllib.parse import urlparse
@@ -9,6 +10,7 @@ from urllib.parse import urlparse
 from radiko.http_client import get, post_form
 from radiko.storage import MemberSession, Membership
 from radiko.stream import ProbeError
+from radiko.urls import loopback_origin
 
 MAX_RESPONSE = 64 * 1024
 LOGIN_PATH = "/ap/member/webapi/member/login"
@@ -61,8 +63,6 @@ def auth_base() -> str:
         ):
             return f"http://127.0.0.1:{parsed.port}"
         raise AuthError("network")
-    from radiko.urls import loopback_origin
-
     origin = loopback_origin()
     if origin:
         return origin
@@ -205,8 +205,6 @@ PLAYER_KEY = b"bcd151073c03b352e1ef2fd66c32209da9ca0afa"
 
 
 def partial_key(offset: int, length: int) -> str:
-    import base64
-
     end = offset + length
     if offset < 0 or length <= 0 or end > len(PLAYER_KEY):
         raise ProbeError("auth-format")

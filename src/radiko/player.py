@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass, field
 
 from radiko.hls import HlsCursor, MediaPlaylist, parse_media_playlist
-from radiko.media import AdtsDecoder, DecodedPcm
+from radiko.media import AacError, AdtsDecoder, DecodedPcm
 from radiko.output import OutputSummary, play_samples
 
 RING_SECONDS = 2
@@ -121,8 +121,6 @@ def play_adts_bytes(
 ) -> DecodedPcm:
     decoder = AdtsDecoder()
     if stop.is_set():
-        from radiko.media import AacError
-
         raise AacError("cancelled")
     pcm = decoder.decode_segment_pcm(data, declared, stop.is_set)
     if limit is not None:

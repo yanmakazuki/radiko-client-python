@@ -261,9 +261,9 @@ def validate_mp4(data: bytes) -> None:
         start = marker - 4
         if start < 0:
             raise AacError("container")
-        _walk(memoryview(data)[start:], 0, [0], [0])
+        _walk(memoryview(data)[start:], 0, 0, 0)
         return
-    _walk(data, 0, [0], [0])
+    _walk(data, 0, 0, 0)
 
 
 def _looks_like_box(data: bytes) -> bool:
@@ -277,15 +277,15 @@ def _word(data, offset: int) -> int:
     return int.from_bytes(chunk, "big")
 
 
-def _walk(data, depth: int, boxes: list[int], samples: list[int]) -> None:
+def _walk(data, depth: int, boxes: int, samples: int) -> tuple[int, int]:
     if depth > 16:
         raise AacError("container")
     view = memoryview(data)
     total = len(view)
     pos = 0
     while pos < total:
-        boxes[0] += 1
-        if boxes[0] > MAX_BOXES:
+        boxes += 1
+        if boxes > MAX_BOXES:
             raise AacError("many")
         size = _word(view, pos)
         kind = bytes(view[pos + 4 : pos + 8])
@@ -315,12 +315,12 @@ def _walk(data, depth: int, boxes: list[int], samples: list[int]) -> None:
             b"traf",
             b"edts",
         }:
-            _walk(view[payload : pos + size], depth + 1, boxes, samples)
+            boxes, samples = _walk(view[payload : pos + size], depth + 1, boxes, samples)
         elif kind in {b"trun", b"stsz", b"stz2"}:
             offset = 4 if kind == b"trun" else 8
             count = _word(view, payload + offset)
-            samples[0] += count
-            if samples[0] > MAX_ENTRIES:
+            samples += count
+            if samples > MAX_ENTRIES:
                 raise AacError("many")
         elif kind in {b"stts", b"ctts", b"stsc", b"stco", b"co64", b"stss", b"elst"}:
             count = _word(view, payload + 4)
@@ -333,6 +333,7 @@ def _walk(data, depth: int, boxes: list[int], samples: list[int]) -> None:
                     if expanded > MAX_ENTRIES:
                         raise AacError("many")
         pos += size
+    return boxes, samples
 
 
 def encode_adts_sine(packets: int = 2, rate: int = 44100) -> bytes:
