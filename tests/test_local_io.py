@@ -308,3 +308,57 @@ def test_probe_silent_reuses_one_alsa_stream_for_all_chunks(monkeypatch):
     assert len(closed) == 1
 
 
+def test_decode_returns_float32_numpy_and_matches_list_playback(monkeypatch):
+    import threading
+
+    import numpy as np
+
+    from radiko.media import AdtsDecoder, encode_adts_sine
+    from radiko.output import play_samples
+
+    pcm = AdtsDecoder().decode_segment_pcm(encode_adts_sine(packets=2), None, lambda: False)
+    assert isinstance(pcm.samples, np.ndarray)
+    assert pcm.samples.dtype == np.float32
+    assert pcm.summary.nonzero_samples == int(np.count_nonzero(pcm.samples))
+    monkeypatch.setenv("RADIKO_NULL_SINK", "1")
+    as_array = play_samples(
+        pcm.samples, pcm.summary.sample_rate, pcm.summary.channels, threading.Event()
+    )
+    as_list = play_samples(
+        pcm.samples.tolist(), pcm.summary.sample_rate, pcm.summary.channels, threading.Event()
+    )
+    assert as_array.frames == as_list.frames
+
+
+def test_remix_and_pcm_quantization_accept_arrays():
+    import ctypes
+
+    import numpy as np
+
+    import radiko.output as output
+
+    block = np.arange(8, dtype=np.float32)
+    assert output._remix(block, 2, 1, 4).tolist() == [0.5, 2.5, 4.5, 6.5]
+    assert output._remix(np.array([1.0, 2.0], dtype=np.float32), 1, 2, 2).tolist() == [
+        1.0,
+        1.0,
+        2.0,
+        2.0,
+    ]
+
+    captured = {}
+
+    class FakeI16:
+        def snd_pcm_writei(self, handle, pointer, frames):
+            captured["i16"] = ctypes.string_at(pointer, frames * 2)
+            return frames
+
+    class FakeI32:
+        def snd_pcm_writei(self, handle, pointer, frames):
+            captured["i32"] = ctypes.string_at(pointer, frames * 4)
+            return frames
+
+    output._write_pcm((FakeI16(), object()), np.array([0.5, -0.5], dtype=np.float32), "i16", 1)
+    assert captured["i16"] == np.array([16383, -16383], dtype=np.int16).tobytes()
+    output._write_pcm((FakeI32(), object()), np.array([0.5, -0.5], dtype=np.float32), "i32", 1)
+    assert captured["i32"] == np.array([1073741823, -1073741823], dtype=np.int32).tobytes()

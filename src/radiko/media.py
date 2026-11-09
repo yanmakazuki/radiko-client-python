@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 
 import av
+import numpy as np
 
 MAX_SEGMENT_BYTES = 8 * 1024 * 1024
 MAX_PACKETS = 4096
@@ -70,7 +71,7 @@ class AacSummary:
 @dataclass
 class DecodedPcm:
     summary: AacSummary
-    samples: list[float]
+    samples: np.ndarray
 
     def __repr__(self) -> str:
         return f"DecodedPcm(summary={self.summary!r}, samples=[REDACTED])"
@@ -195,13 +196,13 @@ class AdtsDecoder:
                 sample_rate=rate,
                 channels=channels,
                 packets=len(frames),
-                frames=len(samples) // max(channels, 1),
+                frames=samples.size // max(channels, 1),
                 sbr_detected=rate > current[1],
                 stereo_expansion=channels > current[2],
                 explicit_ps=False,
-                media_duration=(len(samples) // max(channels, 1)) / rate,
+                media_duration=(samples.size // max(channels, 1)) / rate,
                 decode_duration=time.perf_counter() - started,
-                nonzero_samples=sum(sample != 0.0 for sample in samples),
+                nonzero_samples=int(np.count_nonzero(samples)),
             )
             if summary.sbr_detected and summary.sample_rate <= summary.core_sample_rate:
                 raise AacError("sbr-rate")
@@ -217,12 +218,12 @@ class AdtsDecoder:
             raise
 
 
-def _decode_adts(data: bytes) -> tuple[list[float], int, int]:
+def _decode_adts(data: bytes) -> tuple[np.ndarray, int, int]:
     try:
         container = av.open(io.BytesIO(data), format="aac")
     except av.FFmpegError as error:
         raise AacError("decode") from error
-    samples: list[float] = []
+    chunks: list[np.ndarray] = []
     rate = 0
     channels = 0
     try:
@@ -231,18 +232,19 @@ def _decode_adts(data: bytes) -> tuple[list[float], int, int]:
             channels = len(frame.layout.channels)
             plane = frame.to_ndarray()
             if plane.ndim == 1:
-                samples.extend(float(value) for value in plane)
+                interleaved = plane.reshape(-1)
                 channels = 1
             else:
                 channels = plane.shape[0]
                 interleaved = plane.T.reshape(-1)
-                samples.extend(float(value) for value in interleaved)
+            chunks.append(np.ascontiguousarray(interleaved, dtype=np.float32))
     except av.FFmpegError as error:
         raise AacError("decode") from error
     finally:
         container.close()
-    if not samples or rate <= 0 or channels <= 0:
+    if not chunks or rate <= 0 or channels <= 0:
         raise AacError("empty")
+    samples = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
     return samples, rate, channels
 
 
@@ -331,20 +333,15 @@ def _walk(data: bytes, depth: int, boxes: list[int], samples: list[int]) -> None
 
 def encode_adts_sine(packets: int = 2, rate: int = 44100) -> bytes:
     """試験用の AAC-LC ADTS。実配信のバイト列ではない。"""
-    import math
-
-    import numpy as np
-
     output = io.BytesIO()
     container = av.open(output, mode="w", format="adts")
     stream = container.add_stream("aac", rate=rate)
     stream.layout = "mono"
+    positions = np.arange(packets * 1024, dtype=np.float64)
+    values = (0.2 * np.sin(2 * np.pi * 440 * positions / rate)).astype(np.float32)
     for index in range(packets):
-        samples = np.zeros((1, 1024), dtype="float32")
-        for offset in range(1024):
-            position = index * 1024 + offset
-            samples[0, offset] = 0.2 * math.sin(2 * math.pi * 440 * position / rate)
-        frame = av.AudioFrame.from_ndarray(samples, format="fltp", layout="mono")
+        block = np.ascontiguousarray(values[index * 1024 : (index + 1) * 1024].reshape(1, 1024))
+        frame = av.AudioFrame.from_ndarray(block, format="fltp", layout="mono")
         frame.sample_rate = rate
         frame.pts = index * 1024
         for packet in stream.encode(frame):

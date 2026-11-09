@@ -1031,7 +1031,7 @@ def probe_media(args: list[str], data_dir: Path | None) -> None:
     )
     _print_probe(report)
     if args[0] == "play-sample":
-        if not report.samples:
+        if report.samples is None or len(report.samples) == 0:
             raise RuntimeError("取得したサンプルは音声出力に対応していません")
         from radiko.output import play_samples
 
