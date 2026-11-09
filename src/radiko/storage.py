@@ -10,6 +10,7 @@ import stat
 from pathlib import Path
 
 from radiko.domain import SearchCriteria, criteria_from_file
+from radiko.text import has_control
 
 MAX_SESSION_BYTES = 16 * 1024
 MAX_SEARCH_BYTES = 128 * 1024
@@ -476,12 +477,6 @@ def _check_name(name: str) -> None:
         or name != name.strip()
         or len(name) > 64
         or len(name.encode()) > 256
-        or any(unicat(char) for char in name)
+        or has_control(name)
     ):
         raise SearchError("name")
-
-
-def unicat(char: str) -> bool:
-    import unicodedata
-
-    return unicodedata.category(char) == "Cc"

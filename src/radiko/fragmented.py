@@ -9,7 +9,7 @@ from __future__ import annotations
 import av
 import numpy as np
 
-from radiko.media import MAX_SEGMENT_BYTES, AacError
+from radiko.media import MAX_SEGMENT_BYTES, AacError, validate_mp4
 
 _RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
 
@@ -84,10 +84,8 @@ def _word(data, at: int) -> int:
     return int.from_bytes(chunk, "big")
 
 
-def _take(data: bytes, at: list[int]) -> int:
-    value = _word(data, at[0])
-    at[0] += 4
-    return value
+def _take(data, at: int) -> tuple[int, int]:
+    return _word(data, at), at + 4
 
 
 def _asc_config(asc) -> tuple[int, int]:
@@ -144,7 +142,6 @@ class FragmentedAacDecoder:
     def __init__(self, init: bytes):
         if len(init) > 1024 * 1024:
             raise AacError("large")
-        from radiko.media import validate_mp4
 
         validate_mp4(init)
         top = _atoms(init)
@@ -218,7 +215,6 @@ class FragmentedAacDecoder:
             raise AacError("cancelled")
         if len(data) > MAX_SEGMENT_BYTES:
             raise AacError("large")
-        from radiko.media import validate_mp4
 
         validate_mp4(data)
         top = _atoms(data)
@@ -250,14 +246,22 @@ class FragmentedAacDecoder:
         flags = _word(tfhd, 0)
         if flags & ~0x2003A or flags & 0x20000 == 0 or _word(tfhd, 4) != self.track:
             raise AacError("unsupported-container")
-        at = [8]
-        if flags & 2 and _take(tfhd, at) != 1:
-            raise AacError("unsupported-container")
-        default_duration = _take(tfhd, at) if flags & 8 else self.default_duration
-        default_size = _take(tfhd, at) if flags & 16 else self.default_size
+        at = 8
+        if flags & 2:
+            selector, at = _take(tfhd, at)
+            if selector != 1:
+                raise AacError("unsupported-container")
+        if flags & 8:
+            default_duration, at = _take(tfhd, at)
+        else:
+            default_duration = self.default_duration
+        if flags & 16:
+            default_size, at = _take(tfhd, at)
+        else:
+            default_size = self.default_size
         if flags & 32:
-            _take(tfhd, at)
-        if at[0] != len(tfhd):
+            _, at = _take(tfhd, at)
+        if at != len(tfhd):
             raise AacError("container")
         tfdt = _one(traf, b"tfdt").data
         version = _word(tfdt, 0)
@@ -283,19 +287,25 @@ class FragmentedAacDecoder:
             offset = offset - 0x100000000
         if offset < 0 or moof.offset + offset != mdat.offset + mdat.header:
             raise AacError("container")
-        cursor_at = [12]
+        cursor_at = 12
         if flags & 4:
-            _take(trun, cursor_at)
+            _, cursor_at = _take(trun, cursor_at)
         packets = []
         duration = 0
         cursor = 0
         for _ in range(count):
             if cancelled():
                 raise AacError("cancelled")
-            dur = _take(trun, cursor_at) if flags & 0x100 else default_duration
-            size = _take(trun, cursor_at) if flags & 0x200 else default_size
+            if flags & 0x100:
+                dur, cursor_at = _take(trun, cursor_at)
+            else:
+                dur = default_duration
+            if flags & 0x200:
+                size, cursor_at = _take(trun, cursor_at)
+            else:
+                size = default_size
             if flags & 0x400:
-                _take(trun, cursor_at)
+                _, cursor_at = _take(trun, cursor_at)
             if dur == 0 or size == 0:
                 raise AacError("container")
             duration += dur
@@ -305,7 +315,7 @@ class FragmentedAacDecoder:
                 raise AacError("container")
             packets.append(bytes(piece))
             cursor = end
-        if cursor_at[0] != len(trun) or cursor != len(mdat.data):
+        if cursor_at != len(trun) or cursor != len(mdat.data):
             raise AacError("container")
         return {
             "decode_time": decode_time,

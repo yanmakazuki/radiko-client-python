@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import functools
+import os
+import queue
+import select
+import signal
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
 
-from radiko.catalog import parse_programs
+import radiko.catalog as catalog
+from radiko.auth import AuthError, MemberClient
+from radiko.catalog import (
+    acquire_range,
+    acquire_stations,
+    parse_day,
+    parse_programs,
+)
 from radiko.domain import (
     STATUS_LABEL,
     BroadcastRange,
@@ -21,8 +34,13 @@ from radiko.domain import (
     broadcast_day,
     broadcast_status,
 )
+from radiko.http_client import catalog_fetch
+from radiko.output import OutputError, diagnose_default_output
+from radiko.prepare import inspect_remote_chapters, play_station
+from radiko.storage import SearchStore, SessionStore, default_data_dir
 from radiko.stream import validate_station
 from radiko.text import cluster_width, display_width, graphemes
+from radiko_client.io import stdout_ln
 
 DEVICE_NOTE = "出力機器は OS の既定に従います。アプリ内では選べません"
 DEVICE_GUIDANCE = "OSのサウンド設定を確認し、d で閉じてから Enter で再生し直してください"
@@ -87,8 +105,6 @@ class FilterForm:
         return f"{body}\n{self.error}\n{hint}"
 
     def criteria(self) -> SearchCriteria:
-        from radiko.catalog import parse_day
-
         start = parse_day(self.start)
         end = start if not self.end.strip() else parse_day(self.end.strip())
         scope_text = self.scope.strip()
@@ -911,9 +927,6 @@ class Screen:
             self.fetch_programs = True
 
     def _request_device(self) -> None:
-        import queue
-        import threading
-
         self.device_generation += 1
         generation = self.device_generation
         self.device_status = "loading"
@@ -923,8 +936,6 @@ class Screen:
         probe = self.device_probe
 
         def work() -> None:
-            from radiko.output import OutputError, diagnose_default_output
-
             try:
                 report = (probe or diagnose_default_output)(48000)
                 box.put((generation, report, ""))
@@ -940,7 +951,6 @@ class Screen:
         box = self.device_box
         if box is None:
             return
-        import queue
 
         try:
             generation, report, sentence = box.get_nowait()
@@ -1085,7 +1095,6 @@ class Screen:
                 NoticeLevel.INFO, "オフライン確認では保存条件を読み書きしません", sticky=False
             )
             return
-        from radiko.storage import SearchStore, default_data_dir
 
         store = SearchStore(self.data_dir or default_data_dir())
         try:
@@ -1303,7 +1312,6 @@ def perform_pending(screen: Screen) -> None:
         _start_job(screen, "fetch", screen.ensure_criteria())
     if screen.logout_request:
         screen.logout_request = False
-        from radiko.storage import SessionStore
 
         store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
         store.delete()
@@ -1314,9 +1322,6 @@ def perform_pending(screen: Screen) -> None:
         screen.login_request = None
         screen.password = ""
         try:
-            from radiko.auth import MemberClient
-            from radiko.storage import SessionStore
-
             session, _membership = MemberClient.create().login(mail, password)
             store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
             store.save(session)
@@ -1342,9 +1347,6 @@ def perform_pending(screen: Screen) -> None:
 
 
 def _refresh_auth(screen: Screen) -> None:
-    from radiko.auth import AuthError, MemberClient
-    from radiko.storage import SessionStore
-
     store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
     try:
         session = store.load()
@@ -1380,10 +1382,7 @@ def _refresh_auth(screen: Screen) -> None:
 
 
 def _fetch_programs(criteria: SearchCriteria, cancel) -> dict:
-    from radiko.catalog import CatalogClient, acquire_range, acquire_stations
-    from radiko.http_client import catalog_fetch
-
-    client = CatalogClient(catalog_fetch)
+    client = catalog.CatalogClient(catalog_fetch)
     scope = criteria.scope
     if scope.kind == "station" and isinstance(scope.value, str):
         report = acquire_stations(
@@ -1420,9 +1419,6 @@ def _fetch_programs(criteria: SearchCriteria, cancel) -> dict:
 
 
 def _start_job(screen: Screen, kind: str, payload) -> None:
-    import queue
-    import threading
-
     previous = screen.job_cancel
     if previous is not None:
         previous.set()
@@ -1438,8 +1434,6 @@ def _start_job(screen: Screen, kind: str, payload) -> None:
             if kind == "fetch":
                 result = ("fetch", _fetch_programs(payload, cancel))
             elif kind == "chapters":
-                from radiko.prepare import inspect_remote_chapters
-
                 program = payload
                 view = inspect_remote_chapters(
                     program.key.station_id, program.key.starts_at, cancel.is_set
@@ -1447,9 +1441,6 @@ def _start_job(screen: Screen, kind: str, payload) -> None:
                 result = ("chapters", (program, view))
             else:
                 program, offset, mode, now, data_dir = payload
-                from radiko.auth import MemberClient
-                from radiko.prepare import play_station
-                from radiko.storage import SessionStore
 
                 store = SessionStore(data_dir) if data_dir else SessionStore.default()
                 session = store.load()
@@ -1478,8 +1469,6 @@ def _start_job(screen: Screen, kind: str, payload) -> None:
 
 
 def poll_jobs(screen: Screen) -> None:
-    import queue
-
     box = screen.job_box
     if box is None:
         return
@@ -1526,8 +1515,6 @@ def poll_jobs(screen: Screen) -> None:
 
 
 def wait_jobs(screen: Screen, timeout: float = 8.0) -> None:
-    import time
-
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         poll_jobs(screen)
@@ -1542,8 +1529,6 @@ def wait_jobs(screen: Screen, timeout: float = 8.0) -> None:
 def run(args: list[str], data_dir: Path | None) -> None:
     offline, rest = split_args(args)
     if rest == ["--help"]:
-        from radiko_client.io import stdout_ln
-
         stdout_ln(USAGE)
         return
     if any(arg in {"--json", "--classifications"} for arg in rest):
@@ -1559,8 +1544,6 @@ def run(args: list[str], data_dir: Path | None) -> None:
     station = positional[0] if positional else "TBS"
     screen = Screen([], now, offline=offline, data_dir=data_dir, station_id=station)
     if positional:
-        from radiko.catalog import parse_day
-
         day = parse_day(positional[1]) if len(positional) > 1 else broadcast_day(screen.now)
         screen.criteria = SearchCriteria.create(
             Scope.station(positional[0]),
@@ -1578,7 +1561,6 @@ def run(args: list[str], data_dir: Path | None) -> None:
 
 
 def _terminal_loop(screen: Screen) -> None:
-    import signal
     import termios
     import tty
 
@@ -1622,9 +1604,6 @@ def service_loop(screen: Screen, read_key, paint=None) -> None:
 
 
 def _read_raw(timeout: float | None) -> bytes | None:
-    import os
-    import select
-
     fd = sys.stdin.fileno()
     if timeout is not None and not select.select([fd], [], [], timeout)[0]:
         return None

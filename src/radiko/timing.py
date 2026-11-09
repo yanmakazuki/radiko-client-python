@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from radiko.media import AacError
 from radiko.stream import ProbeError
@@ -38,8 +38,6 @@ def accept_fragment(
 
 def segment_wall(media, sequence: int) -> datetime | None:
     """プレイリスト先頭から EXTINF を足して、その通し番号の番組時刻を求める。"""
-    from datetime import timedelta
-
     stamp = None
     cursor = media.media_sequence
     for segment in media.segments:

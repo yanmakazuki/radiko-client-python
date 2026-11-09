@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import getpass
 import json
+import os
+import queue
+import signal
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import radiko.prepare as prepare
+from radiko.auth import AuthError, MemberClient
 from radiko.catalog import (
     CatalogClient,
     ProgramList,
@@ -17,6 +24,7 @@ from radiko.catalog import (
 )
 from radiko.chapters import parse_chapters
 from radiko.domain import (
+    JST,
     STATUS_LABEL,
     BroadcastRange,
     Filter,
@@ -32,6 +40,7 @@ from radiko.http_client import catalog_fetch
 from radiko.output import (
     OutputError,
     inspect_default_output,
+    play_samples,
     probe_silent,
     probe_tone,
 )
@@ -105,7 +114,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def _silence_stdout() -> None:
     """終了時の flush が壊れたパイプへ届き、141 が 120 に置き換わるのを防ぐ。"""
-    import os
 
     try:
         devnull = os.open(os.devnull, os.O_WRONLY)
@@ -223,16 +231,12 @@ def inspect_chapters(args: list[str]) -> None:
 
 
 def _sigint_stop(stop):
-    import signal
-
     previous = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, lambda *_args: stop.set())
     return previous
 
 
 def _restore_sigint(previous) -> None:
-    import signal
-
     signal.signal(signal.SIGINT, previous)
 
 
@@ -250,7 +254,6 @@ def member_command(command: str, store: SessionStore) -> None:
         if saved is None:
             stdout_ln("未ログインです。loginでログインしてください")
             return
-        from radiko.auth import MemberClient
 
         membership = MemberClient.create().check(saved)
         _print_membership(membership)
@@ -259,12 +262,9 @@ def member_command(command: str, store: SessionStore) -> None:
         raise RuntimeError("loginは対話端末で実行してください")
     stderr_ln("メールアドレス: ")
     mail = sys.stdin.readline()
-    import getpass
 
     password = getpass.getpass("パスワード（非表示）: ")
     try:
-        from radiko.auth import MemberClient
-
         session, membership = MemberClient.create().login(mail.strip(), password)
     finally:
         password = "\0" * len(password)
@@ -338,7 +338,6 @@ def probe_output(args: list[str]) -> None:
         seconds = _parse_u32(values[0])
     else:
         seconds = 30 if muted else 2
-    import threading
 
     stop = threading.Event()
     if muted:
@@ -631,8 +630,6 @@ def _print_station_day(request: ProgramRequest, now: datetime) -> None:
 
 
 def _acquire(request: ProgramRequest, now: datetime) -> None:
-    import threading
-
     client = CatalogClient(catalog_fetch)
     cancel = threading.Event()
 
@@ -823,13 +820,11 @@ def chapters(args: list[str]) -> None:
         raise RuntimeError(CHAPTERS_USAGE)
     validate_station(args[0])
     cursor = parse_time(args[1])
-    from radiko.prepare import ChapterFailure, inspect_remote_chapters
 
     try:
-        view = inspect_remote_chapters(args[0], cursor)
-    except ChapterFailure as error:
+        view = prepare.inspect_remote_chapters(args[0], cursor)
+    except prepare.ChapterFailure as error:
         raise RuntimeError(str(error)) from error
-    from radiko.domain import JST
 
     start = view.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     end = view.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
@@ -856,15 +851,12 @@ def play(args: list[str], data_dir: Path | None) -> None:
     now = datetime.now(timezone.utc)
     mode, station, cursor, seconds, offset, interactive = _play_request(args, now)
     session = _require_session(data_dir)
-    import threading
 
     commands = None
     notice = None
     stop = threading.Event()
     previous = _sigint_stop(stop)
     if interactive and sys.stdin.isatty():
-        import queue
-
         box: queue.Queue[str] = queue.Queue(4)
 
         def reader() -> None:
@@ -904,8 +896,6 @@ def play(args: list[str], data_dir: Path | None) -> None:
         stdout_ln("中断しました")
         return
     stderr_ln("放送枠・配信条件を確認して連続再生を準備しています…")
-    from radiko.domain import JST
-    from radiko.prepare import play_station
 
     def ready(program) -> None:
         start = program.start.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
@@ -916,7 +906,7 @@ def play(args: list[str], data_dir: Path | None) -> None:
         )
 
     try:
-        report = play_station(
+        report = prepare.play_station(
             station,
             mode,
             cursor,
@@ -1019,21 +1009,18 @@ def probe_media(args: list[str], data_dir: Path | None) -> None:
         if cursor > now:
             raise ProbeError("upcoming")
     session = _require_session(data_dir)
-    import threading
 
     stop = threading.Event()
     membership = _membership(session, stop)
     stderr_ln("会員セッション有効。放送枠・配信認証・HLSを検証しています…")
-    from radiko.prepare import probe
 
-    report = probe(
+    report = prepare.probe(
         args[1], mode, cursor, now, session, membership, args[0] == "play-sample", stop.is_set
     )
     _print_probe(report)
     if args[0] == "play-sample":
         if report.samples is None or len(report.samples) == 0:
             raise RuntimeError("取得したサンプルは音声出力に対応していません")
-        from radiko.output import play_samples
 
         summary = play_samples(report.samples, report.sample_rate, report.channels)
         stdout_ln(
@@ -1055,8 +1042,6 @@ def _require_session(data_dir: Path | None):
 
 
 def _membership(session, stop):
-    from radiko.auth import AuthError, MemberClient
-
     try:
         return MemberClient.create(stop.is_set).check(session)
     except AuthError as error:
@@ -1066,8 +1051,6 @@ def _membership(session, stop):
 
 
 def _print_probe(report) -> None:
-    from radiko.domain import JST
-
     start = report.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     end = report.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     stdout_ln(f"{report.station} / {report.mode} / {start}–{end}（日本時間）")
