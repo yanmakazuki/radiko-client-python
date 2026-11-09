@@ -37,34 +37,35 @@ class FragmentPcm:
 
 
 class _Atom:
-    def __init__(self, kind: bytes, data: bytes, offset: int, header: int):
+    def __init__(self, kind: bytes, data, offset: int, header: int):
         self.kind = kind
         self.data = data
         self.offset = offset
         self.header = header
 
 
-def _atoms(data: bytes) -> list[_Atom]:
+def _atoms(data) -> list[_Atom]:
+    view = memoryview(data)
+    total = len(view)
     result = []
     at = 0
-    while at < len(data):
+    while at < total:
         if len(result) == 8192:
             raise AacError("many")
-        rest = data[at:]
-        size = _word(rest, 0)
-        kind = rest[4:8]
+        size = _word(view, at)
+        kind = bytes(view[at + 4 : at + 8])
         if len(kind) != 4:
             raise AacError("container")
         if size == 0:
-            size, header = len(rest), 8
+            size, header = total - at, 8
         elif size == 1:
-            size = (_word(rest, 8) << 32) | _word(rest, 12)
+            size = (_word(view, at + 8) << 32) | _word(view, at + 12)
             header = 16
         else:
             header = 8
-        if size < header or size > len(rest):
+        if size < header or size > total - at:
             raise AacError("container")
-        result.append(_Atom(kind, rest[header:size], at, header))
+        result.append(_Atom(kind, view[at + header : at + size], at, header))
         at += size
     return result
 
@@ -76,7 +77,7 @@ def _one(items: list[_Atom], kind: bytes) -> _Atom:
     return found[0]
 
 
-def _word(data: bytes, at: int) -> int:
+def _word(data, at: int) -> int:
     chunk = data[at : at + 4]
     if len(chunk) != 4:
         raise AacError("container")
@@ -89,7 +90,7 @@ def _take(data: bytes, at: list[int]) -> int:
     return value
 
 
-def _asc_config(asc: bytes) -> tuple[int, int]:
+def _asc_config(asc) -> tuple[int, int]:
     if len(asc) < 2:
         raise AacError("config")
     bits = int.from_bytes(asc[:2], "big")
@@ -101,12 +102,12 @@ def _asc_config(asc: bytes) -> tuple[int, int]:
     return _RATES[rate_index], channels
 
 
-def _decoder_specific(esds: bytes) -> bytes:
+def _decoder_specific(esds) -> bytes | memoryview:
     if len(esds) < 4:
         raise AacError("config")
     body = esds[4:]
 
-    def walk(blob: bytes) -> bytes | None:
+    def walk(blob) -> bytes | memoryview | None:
         index = 0
         while index < len(blob):
             tag = blob[index]
@@ -302,7 +303,7 @@ class FragmentedAacDecoder:
             piece = mdat.data[cursor:end]
             if len(piece) != size:
                 raise AacError("container")
-            packets.append(piece)
+            packets.append(bytes(piece))
             cursor = end
         if cursor_at[0] != len(trun) or cursor != len(mdat.data):
             raise AacError("container")

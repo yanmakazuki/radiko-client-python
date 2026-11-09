@@ -108,21 +108,23 @@ def split_adts(data: bytes, cancelled) -> list[_Frame]:
     offset = audio_offset(data)
     if offset > len(data):
         raise AacError("metadata")
-    remaining = data[offset:]
+    view = memoryview(data)
+    total = len(view)
+    pos = offset
     frames: list[_Frame] = []
-    while remaining:
+    while pos < total:
         if cancelled():
             raise AacError("cancelled")
         if len(frames) >= MAX_PACKETS:
             raise AacError("many")
-        if len(remaining) < 7:
+        if total - pos < 7:
             raise AacError("truncated")
-        header = _parse_adts(remaining)
+        header = _parse_adts(view[pos : pos + 7])
         if header["frame_length"] <= header["header_len"]:
             raise AacError("header")
-        if header["frame_length"] > len(remaining):
+        if header["frame_length"] > total - pos:
             raise AacError("truncated")
-        if header["header_len"] != 7 or remaining[6] & 3 != 0:
+        if header["header_len"] != 7 or view[pos + 6] & 3 != 0:
             raise AacError("transport")
         if header["channels"] == 0 or header["channels"] > 7 or header["object_type"] != 2:
             raise AacError("codec")
@@ -131,16 +133,16 @@ def split_adts(data: bytes, cancelled) -> list[_Frame]:
                 header["object_type"],
                 header["sample_rate"],
                 header["channels"],
-                remaining[header["header_len"] : header["frame_length"]],
+                bytes(view[pos + header["header_len"] : pos + header["frame_length"]]),
             )
         )
-        remaining = remaining[header["frame_length"] :]
+        pos += header["frame_length"]
     if not frames:
         raise AacError("empty")
     return frames
 
 
-def _parse_adts(data: bytes) -> dict:
+def _parse_adts(data) -> dict:
     if data[0] != 0xFF or data[1] & 0xF0 != 0xF0:
         raise AacError("header")
     if (data[1] >> 1) & 0x3 != 0:
@@ -259,7 +261,7 @@ def validate_mp4(data: bytes) -> None:
         start = marker - 4
         if start < 0:
             raise AacError("container")
-        _walk(data[start:], 0, [0], [0])
+        _walk(memoryview(data)[start:], 0, [0], [0])
         return
     _walk(data, 0, [0], [0])
 
@@ -268,38 +270,40 @@ def _looks_like_box(data: bytes) -> bool:
     return data[4:8] in {b"ftyp", b"styp", b"moov", b"moof", b"mdat", b"free", b"skip", b"wide"}
 
 
-def _word(data: bytes, offset: int) -> int:
+def _word(data, offset: int) -> int:
     chunk = data[offset : offset + 4]
     if len(chunk) != 4:
         raise AacError("container")
     return int.from_bytes(chunk, "big")
 
 
-def _walk(data: bytes, depth: int, boxes: list[int], samples: list[int]) -> None:
+def _walk(data, depth: int, boxes: list[int], samples: list[int]) -> None:
     if depth > 16:
         raise AacError("container")
-    view = data
-    while view:
+    view = memoryview(data)
+    total = len(view)
+    pos = 0
+    while pos < total:
         boxes[0] += 1
         if boxes[0] > MAX_BOXES:
             raise AacError("many")
-        size = _word(view, 0)
-        kind = view[4:8]
+        size = _word(view, pos)
+        kind = bytes(view[pos + 4 : pos + 8])
         if len(kind) != 4:
             raise AacError("container")
         if size == 0:
-            size = len(view)
+            size = total - pos
             header = 8
         elif size == 1:
-            if len(view) < 16:
+            if total - pos < 16:
                 raise AacError("container")
-            size = int.from_bytes(view[8:16], "big")
+            size = int.from_bytes(view[pos + 8 : pos + 16], "big")
             header = 16
         else:
             header = 8
-        if size < header or size > len(view):
+        if size < header or size > total - pos:
             raise AacError("container")
-        payload = view[header:size]
+        payload = pos + header
         if kind in {
             b"moov",
             b"trak",
@@ -311,24 +315,24 @@ def _walk(data: bytes, depth: int, boxes: list[int], samples: list[int]) -> None
             b"traf",
             b"edts",
         }:
-            _walk(payload, depth + 1, boxes, samples)
+            _walk(view[payload : pos + size], depth + 1, boxes, samples)
         elif kind in {b"trun", b"stsz", b"stz2"}:
             offset = 4 if kind == b"trun" else 8
-            count = _word(payload, offset)
+            count = _word(view, payload + offset)
             samples[0] += count
             if samples[0] > MAX_ENTRIES:
                 raise AacError("many")
         elif kind in {b"stts", b"ctts", b"stsc", b"stco", b"co64", b"stss", b"elst"}:
-            count = _word(payload, 4)
+            count = _word(view, payload + 4)
             if count > MAX_ENTRIES:
                 raise AacError("many")
             if kind == b"stts":
                 expanded = 0
                 for index in range(count):
-                    expanded += _word(payload, 8 + index * 8)
+                    expanded += _word(view, payload + 8 + index * 8)
                     if expanded > MAX_ENTRIES:
                         raise AacError("many")
-        view = view[size:]
+        pos += size
 
 
 def encode_adts_sine(packets: int = 2, rate: int = 44100) -> bytes:

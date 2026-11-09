@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import xml.etree.ElementTree as ET
 import zlib
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 
 from radiko.domain import (
     JST,
+    VALID_AREAS,
     BroadcastRange,
     Classification,
     Program,
@@ -26,6 +28,7 @@ MAX_PROGRAMS = 2048
 MAX_STATIONS = 512
 MAX_DEPTH = 32
 WORKERS = 4
+_FORBIDDEN_DECLARATION = re.compile(r"<!(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 
 
 class CatalogError(Exception):
@@ -73,7 +76,7 @@ class CatalogError(Exception):
 
 
 def validate_area(area: str) -> None:
-    if not any(area == f"JP{number}" for number in range(1, 48)):
+    if area not in VALID_AREAS:
         raise CatalogError("area")
 
 
@@ -99,13 +102,20 @@ def parse_day(text: str) -> date:
 
 
 def parse_clock(text: str) -> datetime:
-    if len(text) != 14 or not text.isdigit():
+    if len(text) != 14 or not text.isascii() or not text.isdigit():
         raise ValueError("bad")
     try:
-        parsed = datetime.strptime(text, "%Y%m%d%H%M%S").replace(tzinfo=JST)
+        return datetime(
+            int(text[0:4]),
+            int(text[4:6]),
+            int(text[6:8]),
+            int(text[8:10]),
+            int(text[10:12]),
+            int(text[12:14]),
+            tzinfo=JST,
+        )
     except ValueError as error:
         raise ValueError("bad") from error
-    return parsed
 
 
 @dataclass
@@ -126,11 +136,7 @@ def parse_programs(data: bytes, station: str, day: date) -> ProgramList:
         text = data.decode()
     except UnicodeError as error:
         raise CatalogError("xml") from error
-    _validate_xml(text, "radiko")
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError as error:
-        raise CatalogError("xml") from error
+    root = _parse_document(text, "radiko")
     stations = [child for child in root if _local(child.tag) == "stations"]
     if len(stations) != 1:
         raise CatalogError("xml")
@@ -203,11 +209,7 @@ def parse_stations(data: bytes, area: str) -> list[Station]:
         text = data.decode()
     except UnicodeError as error:
         raise CatalogError("xml") from error
-    _validate_xml(text, "stations")
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError as error:
-        raise CatalogError("xml") from error
+    root = _parse_document(text, "stations")
     if root.attrib.get("area_id") != area:
         raise CatalogError("wrong-area")
     nodes = [child for child in root if _local(child.tag) == "station"]
@@ -296,45 +298,41 @@ def _classes(genre: ET.Element | None, kind: str) -> list[Classification]:
     return result
 
 
-def _validate_xml(text: str, root_name: str) -> None:
-    if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
+def _parse_document(text: str, root_name: str) -> ET.Element:
+    """1回のパースで要素ツリー・ルート名・最大深さを検証する。"""
+    if _FORBIDDEN_DECLARATION.search(text):
         raise CatalogError("xml")
+    parser = ET.XMLPullParser(events=("start", "end"))
+    root: ET.Element | None = None
     depth = 0
-    seen_root = False
-    index = 0
-    while True:
-        start = text.find("<", index)
-        if start < 0:
-            break
-        if text.startswith("<?", start) or text.startswith("<!", start):
-            end = text.find(">", start)
-            if end < 0:
-                raise CatalogError("xml")
-            index = end + 1
-            continue
-        closing = text.startswith("</", start)
-        end = text.find(">", start)
-        if end < 0:
-            raise CatalogError("xml")
-        empty = text[end - 1] == "/"
-        name = text[start + (2 if closing else 1) : end].split()[0].strip("/")
-        name = name.rsplit("}", 1)[-1]
-        if closing:
-            depth -= 1
-            if depth < 0:
-                raise CatalogError("xml")
-        else:
-            if depth == 0:
-                if seen_root or name != root_name:
-                    raise CatalogError("xml")
-                seen_root = True
-            if not empty:
+
+    def consume(events) -> None:
+        nonlocal root, depth
+        for event, element in events:
+            if event == "start":
+                if depth == 0:
+                    if root is not None or _local(element.tag) != root_name:
+                        raise CatalogError("xml")
+                    root = element
                 depth += 1
                 if depth > MAX_DEPTH:
                     raise CatalogError("xml")
-        index = end + 1
-    if not seen_root or depth != 0:
+            else:
+                depth -= 1
+                if depth < 0:
+                    raise CatalogError("xml")
+
+    try:
+        for start in range(0, len(text), 65536):
+            parser.feed(text[start : start + 65536])
+            consume(parser.read_events())
+        consume(parser.read_events())
+        parser.close()
+    except ET.ParseError as error:
+        raise CatalogError("xml") from error
+    if root is None or depth != 0:
         raise CatalogError("xml")
+    return root
 
 
 def loopback_origin(value: str) -> str | None:
