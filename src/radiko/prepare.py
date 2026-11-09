@@ -808,10 +808,10 @@ def _play_station(
     def close_stream() -> None:
         nonlocal stream, played_frames, underrun_frames
         if stream is not None:
+            stream.close()
             summary = stream.summary()
             played_frames += summary.frames
             underrun_frames += summary.underrun_frames
-            stream.close()
             stream = None
 
     def emit(piece, rate: int, channels: int) -> None:
