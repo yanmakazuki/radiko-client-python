@@ -212,6 +212,7 @@ class _AlsaStream(OutputStream):
         self.paused = paused or threading.Event()
         self.step_hook = step_hook
         self.quantum = max(rate // 50, 1)
+        self.closed = False
 
     def write(self, samples, volume: int = 100) -> None:
         array = _prepare(samples, volume)
@@ -234,7 +235,9 @@ class _AlsaStream(OutputStream):
             self.frames += step
 
     def close(self) -> None:
-        _close(self.opened)
+        if not self.closed:
+            self.closed = True
+            _close(self.opened)
 
 
 class _CoreAudioStream(OutputStream):
@@ -249,7 +252,11 @@ class _CoreAudioStream(OutputStream):
         super().__init__(rate, channels, "f32", info.channels)
 
     def write(self, samples, volume: int = 100) -> None:
-        self.stream.write(samples, volume)
+        array = np.asarray(samples, dtype=np.float32).reshape(-1)
+        frames = array.size // self.input_channels if self.input_channels else 0
+        if self.input_channels and self.input_channels != self.channels:
+            array = _remix(array, self.input_channels, self.channels, frames)
+        self.stream.write(array, volume)
         self.frames = self.stream.queued_frames
 
     def close(self) -> None:
@@ -293,6 +300,7 @@ def probe_silent(seconds: int, stop, on_progress=None) -> OutputSummary:
             stream.write(np.zeros(rate * channels, dtype=np.float32))
             if on_progress is not None and (index + 1) % 5 == 0:
                 on_progress(stream.summary())
+        stream.close()
         summary = stream.summary()
     return summary
 
@@ -309,6 +317,7 @@ def play_samples(
     """インターリーブされた f32 を出す。一時停止中はメディア位置を進めない。"""
     with open_stream(rate, channels, stop, paused, step_hook) as stream:
         stream.write(samples, volume)
+        stream.close()
         return stream.summary()
 
 

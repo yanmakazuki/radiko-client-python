@@ -120,7 +120,19 @@ class Stream:
         self.channels = channels
         self.stop = stop or threading.Event()
         self.step_hook = step_hook
-        self.handle = _open(rate, channels)
+        self.outstanding = 0
+        self.lib = library()
+        if self.lib is None:
+            raise OutputError("none")
+
+        def completed(_user, queue, buffer) -> None:
+            self.outstanding = max(0, self.outstanding - 1)
+            free = getattr(self.lib, "AudioQueueFreeBuffer", None)
+            if free is not None and buffer:
+                free(queue, buffer)
+
+        self.callback = _OUTPUT_CALLBACK(completed)
+        self.handle = _open(rate, channels, lib=self.lib, callback=self.callback)
         if self.handle is None:
             raise OutputError("none")
         self.lib, self.queue, self.callback = self.handle
@@ -151,8 +163,10 @@ class Stream:
         destination = ctypes.cast(buffer_ref.contents.mAudioData, ctypes.POINTER(ctypes.c_char))
         ctypes.memmove(destination, payload.ctypes.data, size)
         buffer_ref.contents.mAudioDataByteSize = size
+        self.outstanding += 1
         status = self.lib.AudioQueueEnqueueBuffer(self.queue, buffer_ref, 0, None)
         if status != 0:
+            self.outstanding -= 1
             raise OutputError("device")
         if not self.started:
             status = self.lib.AudioQueueStart(self.queue, None)
@@ -211,14 +225,15 @@ def play(
     return OutputSummary(stream.played_frames, rate, stream.channels, "f32", 0)
 
 
-def _open(rate: int, channels: int, lib=None):
+def _open(rate: int, channels: int, lib=None, callback=None):
     lib = library() if lib is None else lib
     if lib is None:
         return None
     _bind(lib)
     description = _description(rate, channels)
     queue = ctypes.c_void_p()
-    callback = _OUTPUT_CALLBACK(lambda *_args: None)
+    if callback is None:
+        callback = _OUTPUT_CALLBACK(lambda *_args: None)
     _callbacks.append(callback)
     status = lib.AudioQueueNewOutput(
         ctypes.byref(description),
@@ -493,6 +508,7 @@ def _bind(lib) -> None:
             [ctypes.c_void_p, ctypes.POINTER(QueueBuffer), ctypes.c_uint32, ctypes.c_void_p],
             ctypes.c_int32,
         ),
+        "AudioQueueFreeBuffer": ([ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int32),
         "AudioQueueStart": ([ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int32),
         "AudioQueueStop": ([ctypes.c_void_p, ctypes.c_bool], ctypes.c_int32),
         "AudioQueueDispose": ([ctypes.c_void_p, ctypes.c_bool], ctypes.c_int32),

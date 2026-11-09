@@ -257,6 +257,9 @@ def test_probe_silent_streams_one_second_chunks_and_reports_every_five(monkeypat
             calls.append(len(samples))
             self.frames += len(samples) // 2
 
+        def close(self):
+            return None
+
         def summary(self):
             return OutputSummary(self.frames, 48000, 2, "f32", 0)
 
