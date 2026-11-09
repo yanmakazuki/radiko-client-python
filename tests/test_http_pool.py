@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from radiko.catalog import CatalogError, decode_body
-from radiko.http_client import catalog_fetch, stream_get
+from radiko.http_client import catalog_fetch, post_form, stream_get
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -139,3 +139,17 @@ def test_gzip_bomb_expansion_is_bounded_by_tracemalloc():
         tracemalloc.stop()
     assert raised.value.code == "large"
     assert peak < 8 * 1024 * 1024
+
+
+def test_post_uses_a_fresh_connection_after_a_silent_idle_close(monkeypatch):
+    server = _serve()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        monkeypatch.setenv("RADIKO_LOOPBACK_ORIGIN", base)
+        assert stream_get(f"{base}/silent-close").body == b"silent"
+        reply = post_form(f"{base}/login", {"mail": "a", "pass": "b"})
+    finally:
+        server.shutdown()
+    assert reply.status == 200
+    assert reply.body == b"posted"
+    assert _Handler.accepted == 2

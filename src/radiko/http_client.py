@@ -59,15 +59,16 @@ class _ConnectionPool:
         self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
         self.max_idle = 4
 
-    def acquire(self, key, timeout: float):
-        with self._lock:
-            connections = self._idle.get(key)
-            connection = connections.pop() if connections else None
-        if connection is not None:
-            connection.timeout = timeout
-            if connection.sock is not None:
-                connection.sock.settimeout(timeout)
-            return connection
+    def acquire(self, key, timeout: float, fresh: bool = False):
+        if not fresh:
+            with self._lock:
+                connections = self._idle.get(key)
+                connection = connections.pop() if connections else None
+            if connection is not None:
+                connection.timeout = timeout
+                if connection.sock is not None:
+                    connection.sock.settimeout(timeout)
+                return connection
         scheme, host, port = key
         if scheme == "https":
             return http.client.HTTPSConnection(host, port, timeout=timeout)
@@ -272,7 +273,7 @@ def _exchange(
     attempts = 2 if retry_stale else 1
     for attempt in range(attempts):
         key = _key(url)
-        connection = _pool.acquire(key, timeout)
+        connection = _pool.acquire(key, timeout, fresh=method == "POST")
         request_headers = {name: value for name, value in headers.items()}
         if byte_range is not None:
             offset, length = byte_range
