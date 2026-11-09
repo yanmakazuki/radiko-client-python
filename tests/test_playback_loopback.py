@@ -351,6 +351,31 @@ def test_interactive_switch_rebuilds_playback_for_the_selected_station(tmp_path,
     assert report.reason in {"limit", "program-end"}
 
 
+def test_live_playback_keeps_one_output_stream_across_segments(tmp_path, monkeypatch, capsys):
+    import radiko.output as output
+
+    server = _serve()
+    _Handler.live = True
+    _env(monkeypatch, server, tmp_path)
+    opened = []
+    original = output.open_stream
+
+    def counted(*args, **kwargs):
+        opened.append((args[0], args[1]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(output, "open_stream", counted)
+    try:
+        code = main(["--data-dir", str(tmp_path), "play-live", "TBS", "--seconds", "3"])
+    finally:
+        server.shutdown()
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert _Handler.media_fetches >= 3
+    assert len(opened) == 1
+    assert opened[0][0] == 44100
+
+
 def test_segment_cancel_stops_before_claiming_playback(tmp_path, monkeypatch, capsys):
     server = _serve()
     stop = threading.Event()
@@ -426,3 +451,63 @@ def test_tui_login_and_chapter_play_trim_the_segment(tmp_path, monkeypatch):
         server.shutdown()
     assert whole > trimmed > 0
     assert "synthetic-token" not in repr(screen.chapters)
+
+
+def test_decode_failure_in_second_segment_closes_the_stream(tmp_path, monkeypatch):
+    import radiko.output as output
+    from radiko.auth import MemberClient
+    from radiko.media import AacError, AdtsDecoder
+    from radiko.prepare import play_station
+
+    server = _serve()
+    _Handler.live = True
+    _env(monkeypatch, server, tmp_path)
+    real_decode = AdtsDecoder.decode_segment_pcm
+    calls = {"decode": 0}
+
+    def fail_on_second(self, data, declared, cancelled):
+        calls["decode"] += 1
+        if calls["decode"] >= 2:
+            raise AacError("decode")
+        return real_decode(self, data, declared, cancelled)
+
+    monkeypatch.setattr(AdtsDecoder, "decode_segment_pcm", fail_on_second)
+    opened = []
+    closed = []
+    real_open = output.open_stream
+
+    class Tracked:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def write(self, samples, volume=100):
+            self.stream.write(samples, volume)
+
+        def close(self):
+            closed.append(True)
+            self.stream.close()
+
+        def summary(self):
+            return self.stream.summary()
+
+    def counted(*args, **kwargs):
+        opened.append(True)
+        return Tracked(real_open(*args, **kwargs))
+
+    monkeypatch.setattr(output, "open_stream", counted)
+    session = MemberSession("synthetic-token")
+    membership = MemberClient.create().check(session)
+    now = datetime.now(UTC)
+    try:
+        import pytest
+
+        with pytest.raises(AacError):
+            play_station("TBS", "live", now, now, session, membership, 0.0, None, lambda: False)
+    finally:
+        server.shutdown()
+    assert calls["decode"] >= 2
+    assert len(opened) == 1
+    assert len(closed) == 1

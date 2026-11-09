@@ -7,6 +7,7 @@ Rust の `FragmentedAacDecoder` と同じ条件で拒否する。
 from __future__ import annotations
 
 import av
+import numpy as np
 
 from radiko.media import MAX_SEGMENT_BYTES, AacError
 
@@ -19,7 +20,7 @@ class FragmentPcm:
         decode_time: int,
         timescale: int,
         duration: int,
-        samples: list[float],
+        samples: np.ndarray,
         rate: int,
         channels: int,
     ):
@@ -321,18 +322,22 @@ class FragmentedAacDecoder:
             context.sample_rate = self.sample_rate
             context.layout = "mono" if self.channels == 1 else "stereo"
             self._codec = context
-        samples: list[float] = []
+        samples: list[np.ndarray] = []
         for packet in media["packets"]:
             if cancelled():
                 raise AacError("cancelled")
             for frame in self._codec.decode(av.Packet(packet)):
                 plane = frame.to_ndarray()
                 if plane.ndim == 1:
-                    samples.extend(float(value) for value in plane)
+                    interleaved = plane.reshape(-1)
                 else:
-                    samples.extend(float(value) for value in plane.reshape(-1, order="F"))
+                    interleaved = plane.reshape(-1, order="F")
+                samples.append(np.ascontiguousarray(interleaved, dtype=np.float32))
         channels = self.channels
-        frames = len(samples) // channels
+        if not samples:
+            raise AacError("empty")
+        pcm = np.concatenate(samples) if len(samples) > 1 else samples[0]
+        frames = pcm.size // channels
         if frames * self.timescale != media["duration"] * self.sample_rate:
             raise AacError("container")
         if cancelled():
@@ -343,7 +348,7 @@ class FragmentedAacDecoder:
             media["decode_time"],
             self.timescale,
             media["duration"],
-            samples,
+            pcm,
             self.sample_rate,
             channels,
         )

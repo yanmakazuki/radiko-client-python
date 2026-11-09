@@ -164,7 +164,11 @@ def play_playlist(
             break
         if media.end_list and cursor.next_sequence >= media.media_sequence + len(media.segments):
             break
-    summary = play_samples(samples, rate, channels, stop) if samples else None
+    summary = (
+        play_samples(samples, rate, channels, stop)
+        if samples is not None and len(samples)
+        else None
+    )
     reason = (
         "cancelled"
         if stop.is_set()

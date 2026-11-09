@@ -239,15 +239,37 @@ def test_probe_silent_streams_one_second_chunks_and_reports_every_five(monkeypat
 
     from radiko.output import OutputSummary, probe_silent
 
+    opened = []
     calls = []
     progress = []
 
-    def fake(samples, rate, channels, stop=None, paused=None, volume=100, step_hook=None):
-        calls.append(len(samples))
-        return OutputSummary(len(samples) // channels, rate, channels, "f32", 0)
+    class FakeStream:
+        def __init__(self):
+            self.frames = 0
 
-    monkeypatch.setattr("radiko.output.play_samples", fake)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def write(self, samples, volume=100):
+            calls.append(len(samples))
+            self.frames += len(samples) // 2
+
+        def close(self):
+            return None
+
+        def summary(self):
+            return OutputSummary(self.frames, 48000, 2, "f32", 0)
+
+    def fake_open(*_args, **_kwargs):
+        opened.append(True)
+        return FakeStream()
+
+    monkeypatch.setattr("radiko.output.open_stream", fake_open)
     summary = probe_silent(7, threading.Event(), progress.append)
+    assert opened == [True]
     assert calls == [48000 * 2] * 7
     assert len(progress) == 1
     assert summary.frames == 7 * 48000
@@ -260,3 +282,86 @@ def test_null_sink_probe_counts_frames(monkeypatch, capsys):
     out, err = capsys.readouterr()
     assert "無音出力完了: 48000フレーム / 48000Hz / f32 / 2ch" in out
     assert err == ""
+
+
+def test_probe_silent_reuses_one_alsa_stream_for_all_chunks(monkeypatch):
+    import threading
+
+    import radiko.output as output
+
+    opened = []
+    closed = []
+
+    class FakeLibrary:
+        def snd_pcm_set_params(self, *args):
+            return 0
+
+    monkeypatch.setattr(output, "null_sink_enabled", lambda: False)
+    monkeypatch.setattr(output, "host_backend", lambda: "alsa")
+    monkeypatch.setattr(
+        output,
+        "_open_default",
+        lambda: opened.append(True) or (FakeLibrary(), object()),
+    )
+    monkeypatch.setattr(output, "_close", lambda _opened: closed.append(True))
+    monkeypatch.setattr(output, "_write_pcm", lambda *_args: None)
+    summary = output.probe_silent(3, threading.Event())
+    assert summary.frames == 3 * 48000
+    assert len(opened) == 1
+    assert len(closed) == 1
+
+
+def test_decode_returns_float32_numpy_and_matches_list_playback(monkeypatch):
+    import threading
+
+    import numpy as np
+
+    from radiko.media import AdtsDecoder, encode_adts_sine
+    from radiko.output import play_samples
+
+    pcm = AdtsDecoder().decode_segment_pcm(encode_adts_sine(packets=2), None, lambda: False)
+    assert isinstance(pcm.samples, np.ndarray)
+    assert pcm.samples.dtype == np.float32
+    assert pcm.summary.nonzero_samples == int(np.count_nonzero(pcm.samples))
+    monkeypatch.setenv("RADIKO_NULL_SINK", "1")
+    as_array = play_samples(
+        pcm.samples, pcm.summary.sample_rate, pcm.summary.channels, threading.Event()
+    )
+    as_list = play_samples(
+        pcm.samples.tolist(), pcm.summary.sample_rate, pcm.summary.channels, threading.Event()
+    )
+    assert as_array.frames == as_list.frames
+
+
+def test_remix_and_pcm_quantization_accept_arrays():
+    import ctypes
+
+    import numpy as np
+
+    import radiko.output as output
+
+    block = np.arange(8, dtype=np.float32)
+    assert output._remix(block, 2, 1, 4).tolist() == [0.5, 2.5, 4.5, 6.5]
+    assert output._remix(np.array([1.0, 2.0], dtype=np.float32), 1, 2, 2).tolist() == [
+        1.0,
+        1.0,
+        2.0,
+        2.0,
+    ]
+
+    captured = {}
+
+    class FakeI16:
+        def snd_pcm_writei(self, handle, pointer, frames):
+            captured["i16"] = ctypes.string_at(pointer, frames * 2)
+            return frames
+
+    class FakeI32:
+        def snd_pcm_writei(self, handle, pointer, frames):
+            captured["i32"] = ctypes.string_at(pointer, frames * 4)
+            return frames
+
+    output._write_pcm((FakeI16(), object()), np.array([0.5, -0.5], dtype=np.float32), "i16", 1)
+    assert captured["i16"] == np.array([16383, -16383], dtype=np.int16).tobytes()
+    output._write_pcm((FakeI32(), object()), np.array([0.5, -0.5], dtype=np.float32), "i32", 1)
+    assert captured["i32"] == np.array([1073741823, -1073741823], dtype=np.int32).tobytes()

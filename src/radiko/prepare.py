@@ -762,7 +762,7 @@ def _play_station(
     on_notice=None,
     on_ready=None,
 ) -> PlayReport:
-    from radiko.output import play_samples
+    from radiko.output import open_stream
     from radiko.stream import ProbeError
 
     program, headers, _area, _outside, urls = prepare(
@@ -800,6 +800,28 @@ def _play_station(
     if position:
         pending = (program.start + timedelta(seconds=position), position)
         media_seconds = position
+    stream = None
+    stop_playback = _StopView(
+        lambda: cancelled() or control.stopped or control.selected is not None
+    )
+
+    def close_stream() -> None:
+        nonlocal stream, played_frames, underrun_frames
+        if stream is not None:
+            stream.close()
+            summary = stream.summary()
+            played_frames += summary.frames
+            underrun_frames += summary.underrun_frames
+            stream = None
+
+    def emit(piece, rate: int, channels: int) -> None:
+        nonlocal stream
+        if not len(piece):
+            return
+        if stream is None or (stream.rate, stream.input_channels) != (rate, channels):
+            close_stream()
+            stream = open_stream(rate, channels, stop_playback, step_hook=drain)
+        stream.write(piece, volume=control.volume)
 
     def drain(*_args) -> None:
         while True:
@@ -818,65 +840,85 @@ def _play_station(
             if control.stopped or control.selected is not None:
                 return
 
-    while True:
-        if cancelled() or control.stopped:
-            reason = "cancelled"
-            break
-        drain()
-        if control.selected is not None:
-            new_mode, new_station, new_cursor, new_offset = control.selected
-            control.selected = None
-            return _play_station(
-                new_station,
-                new_mode,
-                new_cursor,
-                datetime.now(timezone.utc),
-                session,
-                membership,
-                new_offset,
-                limit,
-                cancelled,
-                [] if isinstance(commands, list) else commands,
-                reconnect_sleep,
-                reauth_now,
-                on_notice,
-                None,
-            )
-        if control.stopped or cancelled():
-            reason = "cancelled"
-            break
-        if control.paused:
-            time.sleep(0.01)
-            continue
-        sequence, media_seconds, pending = _apply_seek(
-            control, media, sequence, media_seconds, program.start, pending
-        )
-        if sequence >= media.media_sequence + len(media.segments):
-            if media.end_list:
-                reason = "program-end"
+    try:
+        while True:
+            if cancelled() or control.stopped:
+                reason = "cancelled"
                 break
-            try:
-                media, playlist_url, sequence = _reload_window(
-                    playlist_url, headers, cancelled, media, sequence, mode, control
+            drain()
+            if control.selected is not None:
+                new_mode, new_station, new_cursor, new_offset = control.selected
+                control.selected = None
+                close_stream()
+                return _play_station(
+                    new_station,
+                    new_mode,
+                    new_cursor,
+                    datetime.now(timezone.utc),
+                    session,
+                    membership,
+                    new_offset,
+                    limit,
+                    cancelled,
+                    [] if isinstance(commands, list) else commands,
+                    reconnect_sleep,
+                    reauth_now,
+                    on_notice,
+                    None,
                 )
-            except ProbeError as error:
-                if _cancelled_error(error) or cancelled():
-                    reason = "cancelled"
+            if control.stopped or cancelled():
+                reason = "cancelled"
+                break
+            if control.paused:
+                time.sleep(0.01)
+                continue
+            sequence, media_seconds, pending = _apply_seek(
+                control, media, sequence, media_seconds, program.start, pending
+            )
+            if sequence >= media.media_sequence + len(media.segments):
+                if media.end_list:
+                    reason = "program-end"
                     break
-                if budget.can_retry(error, taken > 0):
-                    budget.wait()
-                    continue
-                raise
-            continue
-        segment = _segment_at(media, sequence)
-        if segment is None:
-            raise ProbeError("window")
-        try:
-            if segment.map_uri and segment.map_uri != init_uri:
-                init_bytes, headers, media, playlist_url, sequence = _get_or_recover(
-                    _join(playlist_url, segment.map_uri),
+                try:
+                    media, playlist_url, sequence = _reload_window(
+                        playlist_url, headers, cancelled, media, sequence, mode, control
+                    )
+                except ProbeError as error:
+                    if _cancelled_error(error) or cancelled():
+                        reason = "cancelled"
+                        break
+                    if budget.can_retry(error, taken > 0):
+                        budget.wait()
+                        continue
+                    raise
+                continue
+            segment = _segment_at(media, sequence)
+            if segment is None:
+                raise ProbeError("window")
+            try:
+                if segment.map_uri and segment.map_uri != init_uri:
+                    init_bytes, headers, media, playlist_url, sequence = _get_or_recover(
+                        _join(playlist_url, segment.map_uri),
+                        {},
+                        "HLS初期化情報取得",
+                        reauth,
+                        headers,
+                        playlist_url,
+                        media,
+                        sequence,
+                        mode,
+                        cancelled,
+                        "init",
+                    )
+                    fragment_decoder = FragmentedAacDecoder(init_bytes)
+                    init_uri = segment.map_uri
+                    segment = _segment_at(media, sequence)
+                    if segment is None:
+                        raise ProbeError("window")
+                payload, headers, media, playlist_url, sequence = _get_or_recover(
+                    _join(playlist_url, segment.uri),
                     {},
-                    "HLS初期化情報取得",
+                    "HLS音声取得",
                     reauth,
                     headers,
                     playlist_url,
@@ -884,118 +926,89 @@ def _play_station(
                     sequence,
                     mode,
                     cancelled,
-                    "init",
                 )
-                fragment_decoder = FragmentedAacDecoder(init_bytes)
-                init_uri = segment.map_uri
-                segment = _segment_at(media, sequence)
-                if segment is None:
-                    raise ProbeError("window")
-            payload, headers, media, playlist_url, sequence = _get_or_recover(
-                _join(playlist_url, segment.uri),
-                {},
-                "HLS音声取得",
-                reauth,
-                headers,
-                playlist_url,
-                media,
-                sequence,
-                mode,
-                cancelled,
-            )
-        except ProbeError as error:
-            if _cancelled_error(error):
-                reason = "cancelled"
-                break
-            if budget.can_retry(error, taken > 0):
-                try:
-                    budget.wait()
-                    reply = stream_get(
-                        playlist_url,
-                        headers,
-                        limit=TEXT_LIMIT,
-                        cancelled=cancelled,
-                        redirects=True,
-                        readonly_retry=True,
-                    )
-                    media = parse_media_playlist(reply.body.decode())
-                    playlist_url = reply.url
-                except ProbeError as waited:
-                    if _cancelled_error(waited):
-                        reason = "cancelled"
-                        break
-                    if budget.can_retry(waited, True):
-                        continue
-                    raise
-                continue
-            raise
-        reauth.episode = False
-        if fragment_decoder is not None and (
-            payload[4:8] in {b"moof", b"styp"} or (len(payload) > 8 and payload[4:8] == b"moof")
-        ):
-            decoded = fragment_decoder.decode_pcm(payload, cancelled)
-            piece = decoded.samples
-            rate = decoded.sample_rate
-            channels = decoded.channels
-            frame_count = decoded.frames
-            stamp = accept_fragment(
-                segment.duration,
-                frame_count / rate,
-                decoded.decode_time,
-                decoded.timescale,
-                segment_wall(media, sequence),
-                stamp,
-            )
-        else:
-            pcm = decoder.decode_segment_pcm(payload, None, cancelled)
-            piece = pcm.samples
-            rate = pcm.summary.sample_rate
-            channels = pcm.summary.channels
-            frame_count = pcm.summary.frames
-        if pending is not None:
-            target_at, target_seconds = pending
-            trimmed = trim_pcm(piece, channels, rate, segment_wall(media, sequence), target_at)
-            if trimmed is None:
-                sequence += 1
-                continue
-            piece, frame_count = trimmed
-            media_seconds = target_seconds
-            pending = None
-        stop_piece = _StopView(
-            lambda: cancelled() or control.stopped or control.selected is not None
-        )
-        if limit is not None:
-            room = limit - media_seconds
-            if room <= 0:
+            except ProbeError as error:
+                if _cancelled_error(error):
+                    reason = "cancelled"
+                    break
+                if budget.can_retry(error, taken > 0):
+                    try:
+                        budget.wait()
+                        reply = stream_get(
+                            playlist_url,
+                            headers,
+                            limit=TEXT_LIMIT,
+                            cancelled=cancelled,
+                            redirects=True,
+                            readonly_retry=True,
+                        )
+                        media = parse_media_playlist(reply.body.decode())
+                        playlist_url = reply.url
+                    except ProbeError as waited:
+                        if _cancelled_error(waited):
+                            reason = "cancelled"
+                            break
+                        if budget.can_retry(waited, True):
+                            continue
+                        raise
+                    continue
+                raise
+            reauth.episode = False
+            if fragment_decoder is not None and (
+                payload[4:8] in {b"moof", b"styp"} or (len(payload) > 8 and payload[4:8] == b"moof")
+            ):
+                decoded = fragment_decoder.decode_pcm(payload, cancelled)
+                piece = decoded.samples
+                rate = decoded.sample_rate
+                channels = decoded.channels
+                frame_count = decoded.frames
+                stamp = accept_fragment(
+                    segment.duration,
+                    frame_count / rate,
+                    decoded.decode_time,
+                    decoded.timescale,
+                    segment_wall(media, sequence),
+                    stamp,
+                )
+            else:
+                pcm = decoder.decode_segment_pcm(payload, None, cancelled)
+                piece = pcm.samples
+                rate = pcm.summary.sample_rate
+                channels = pcm.summary.channels
+                frame_count = pcm.summary.frames
+            if pending is not None:
+                target_at, target_seconds = pending
+                trimmed = trim_pcm(piece, channels, rate, segment_wall(media, sequence), target_at)
+                if trimmed is None:
+                    sequence += 1
+                    continue
+                piece, frame_count = trimmed
+                media_seconds = target_seconds
+                pending = None
+            if limit is not None:
+                room = limit - media_seconds
+                if room <= 0:
+                    reason = "limit"
+                    break
+                max_frames = int(room * rate)
+                if frame_count > max_frames:
+                    piece = piece[: max_frames * channels]
+                    emit(piece, rate, channels)
+                    taken += 1
+                    sequence += 1
+                    reason = "limit"
+                    break
+            if len(piece):
+                emit(piece, rate, channels)
+            media_seconds += len(piece) / channels / rate
+            taken += 1
+            sequence += 1
+            budget.reset()
+            if limit is not None and media_seconds >= limit:
                 reason = "limit"
                 break
-            max_frames = int(room * rate)
-            if frame_count > max_frames:
-                piece = piece[: max_frames * channels]
-                summary = play_samples(
-                    piece, rate, channels, stop_piece, volume=control.volume, step_hook=drain
-                )
-                played_frames += summary.frames
-                underrun_frames += summary.underrun_frames
-                rate, channels = summary.sample_rate, summary.channels
-                taken += 1
-                sequence += 1
-                reason = "limit"
-                break
-        if piece:
-            summary = play_samples(
-                piece, rate, channels, stop_piece, volume=control.volume, step_hook=drain
-            )
-            played_frames += summary.frames
-            underrun_frames += summary.underrun_frames
-            rate, channels = summary.sample_rate, summary.channels
-        media_seconds += len(piece) / channels / rate
-        taken += 1
-        sequence += 1
-        budget.reset()
-        if limit is not None and media_seconds >= limit:
-            reason = "limit"
-            break
+    finally:
+        close_stream()
     if cancelled():
         reason = "cancelled"
     return PlayReport(

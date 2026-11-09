@@ -11,7 +11,8 @@ import ctypes.util
 import sys
 import threading
 import time
-from array import array
+
+import numpy as np
 
 from radiko.output import OutputError, OutputInfo, OutputSummary
 
@@ -111,83 +112,128 @@ def inspect(rate: int, opened=None) -> OutputInfo:
     return OutputInfo(name, rate, None, None, mismatch)
 
 
+class Stream:
+    """1つの AudioQueue を複数チャンクで使い回す。"""
+
+    def __init__(self, rate: int, channels: int, stop, step_hook=None) -> None:
+        self.rate = rate
+        self.channels = channels
+        self.stop = stop or threading.Event()
+        self.step_hook = step_hook
+        self.outstanding = 0
+        self.lib = library()
+        if self.lib is None:
+            raise OutputError("none")
+
+        def completed(_user, queue, buffer) -> None:
+            self.outstanding = max(0, self.outstanding - 1)
+            free = getattr(self.lib, "AudioQueueFreeBuffer", None)
+            if free is not None and buffer:
+                free(queue, buffer)
+
+        self.callback = _OUTPUT_CALLBACK(completed)
+        self.handle = _open(rate, channels, lib=self.lib, callback=self.callback)
+        if self.handle is None:
+            raise OutputError("none")
+        self.lib, self.queue, self.callback = self.handle
+        self.started = False
+        self.started_at = 0.0
+        self.queued_frames = 0
+        self.played_frames = 0
+        self.closed = False
+
+    def write(self, samples, volume: int = 100) -> None:
+        if self.closed or self.stop.is_set():
+            return
+        array = np.asarray(samples, dtype=np.float32).reshape(-1)
+        gain = max(0, min(volume, 100)) / 100
+        if gain != 1.0:
+            array = array * gain
+        frames = array.size // self.channels
+        if frames <= 0:
+            return
+        payload = np.ascontiguousarray(array, dtype=np.float32)
+        size = payload.nbytes
+        buffer_ref = ctypes.POINTER(QueueBuffer)()
+        status = self.lib.AudioQueueAllocateBuffer(
+            self.queue, max(size, 4), ctypes.byref(buffer_ref)
+        )
+        if status != 0 or not buffer_ref:
+            raise OutputError("device")
+        destination = ctypes.cast(buffer_ref.contents.mAudioData, ctypes.POINTER(ctypes.c_char))
+        ctypes.memmove(destination, payload.ctypes.data, size)
+        buffer_ref.contents.mAudioDataByteSize = size
+        self.outstanding += 1
+        status = self.lib.AudioQueueEnqueueBuffer(self.queue, buffer_ref, 0, None)
+        if status != 0:
+            self.outstanding -= 1
+            raise OutputError("device")
+        if not self.started:
+            status = self.lib.AudioQueueStart(self.queue, None)
+            if status != 0:
+                raise OutputError("device")
+            self.started = True
+            self.started_at = time.monotonic()
+        self.queued_frames += frames
+        self._wait(self.started_at + self.queued_frames / self.rate - 0.25)
+
+    def _wait(self, deadline: float) -> None:
+        while True:
+            if self.step_hook is not None:
+                self.step_hook(self.queued_frames)
+            if self.stop.is_set():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.01, remaining))
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            if self.started:
+                if not self.stop.is_set():
+                    self._wait(self.started_at + self.queued_frames / self.rate)
+                elapsed = time.monotonic() - self.started_at
+                self.played_frames = (
+                    self.queued_frames
+                    if not self.stop.is_set()
+                    else min(self.queued_frames, max(0, int(elapsed * self.rate)))
+                )
+                self.lib.AudioQueueStop(self.queue, True)
+        finally:
+            _dispose(self.handle)
+
+
 def play(
-    samples: list[float],
+    samples,
     rate: int,
     channels: int,
     info: OutputInfo,
     stop,
     step_hook=None,
 ) -> OutputSummary:
-    handle = _open(rate, info.channels or channels)
-    if handle is None:
-        raise OutputError("none")
-    lib, queue, _callback = handle
-    done = threading.Event()
-    frames = len(samples) // channels
-    raw = array("f", samples)
-    started = False
-    started_at = None
-    played_frames = frames
+    stream = Stream(rate, info.channels or channels, stop, step_hook)
     try:
-        size = len(raw) * raw.itemsize
-        buffer_ref = ctypes.POINTER(QueueBuffer)()
-        status = lib.AudioQueueAllocateBuffer(queue, max(size, 4), ctypes.byref(buffer_ref))
-        if status != 0 or not buffer_ref:
-            raise OutputError("device")
-        destination = ctypes.cast(buffer_ref.contents.mAudioData, ctypes.POINTER(ctypes.c_char))
-        ctypes.memmove(destination, raw.tobytes(), size)
-        buffer_ref.contents.mAudioDataByteSize = size
-        status = lib.AudioQueueEnqueueBuffer(queue, buffer_ref, 0, None)
-        if status != 0:
-            raise OutputError("device")
-        status = lib.AudioQueueStart(queue, None)
-        if status != 0:
-            raise OutputError("device")
-        started = True
-        started_at = time.monotonic()
-        deadline = started_at + frames / rate
-        while True:
-            if step_hook is not None:
-                step_hook(played_frames)
-            now = time.monotonic()
-            if stop.is_set():
-                elapsed = now - started_at
-                played_frames = min(frames, max(0, int(elapsed * rate)))
-                break
-            remaining = deadline - now
-            if remaining <= 0:
-                break
-            done.wait(min(0.01, remaining))
-    finally:
-        if started:
-            lib.AudioQueueStop(queue, True)
-        _dispose(handle)
-    return OutputSummary(played_frames, rate, channels, "f32", 0)
+        stream.write(samples)
+        stream.close()
+    except Exception:
+        stream.close()
+        raise
+    return OutputSummary(stream.played_frames, rate, stream.channels, "f32", 0)
 
 
-def _drained(lib, queue) -> bool:
-    function = getattr(lib, "AudioQueueGetProperty", None)
-    if function is None:
-        raise OutputError("none")
-    running = ctypes.c_uint32()
-    size = ctypes.c_uint32(ctypes.sizeof(running))
-    status = function(queue, AUDIO_QUEUE_IS_RUNNING, ctypes.byref(running), ctypes.byref(size))
-    if status != 0 or size.value != ctypes.sizeof(running):
-        raise OutputError("none")
-    return running.value == 0
-
-
-def _open(rate: int, channels: int, lib=None):
+def _open(rate: int, channels: int, lib=None, callback=None):
     lib = library() if lib is None else lib
     if lib is None:
         return None
     _bind(lib)
-    if getattr(lib, "AudioQueueGetProperty", None) is None:
-        return None
     description = _description(rate, channels)
     queue = ctypes.c_void_p()
-    callback = _OUTPUT_CALLBACK(lambda *_args: None)
+    if callback is None:
+        callback = _OUTPUT_CALLBACK(lambda *_args: None)
     _callbacks.append(callback)
     status = lib.AudioQueueNewOutput(
         ctypes.byref(description),
@@ -462,6 +508,7 @@ def _bind(lib) -> None:
             [ctypes.c_void_p, ctypes.POINTER(QueueBuffer), ctypes.c_uint32, ctypes.c_void_p],
             ctypes.c_int32,
         ),
+        "AudioQueueFreeBuffer": ([ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int32),
         "AudioQueueStart": ([ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int32),
         "AudioQueueStop": ([ctypes.c_void_p, ctypes.c_bool], ctypes.c_int32),
         "AudioQueueDispose": ([ctypes.c_void_p, ctypes.c_bool], ctypes.c_int32),

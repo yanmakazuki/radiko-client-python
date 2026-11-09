@@ -192,3 +192,178 @@ def test_playback_callback_stays_alive_until_dispose(monkeypatch):
     assert "stop" in backend.order and backend.order[-1] == "dispose"
     assert backend.alive_at_stop
     assert backend.callback not in _callbacks
+
+
+def test_probe_silent_reuses_one_audioqueue_for_all_chunks(monkeypatch):
+    import threading
+
+    import radiko.output as output
+    from radiko.coreaudio import QueueBuffer
+    from radiko.output import OutputInfo
+
+    storage = ctypes.create_string_buffer(48000 * 2 * 4)
+    holder = QueueBuffer()
+    holder.mAudioData = ctypes.cast(storage, ctypes.c_void_p)
+    holder.mAudioDataBytesCapacity = len(storage)
+
+    class _Queue:
+        def __init__(self):
+            self.new = 0
+            self.enqueued = 0
+            self.disposed = 0
+
+        def AudioQueueNewOutput(self, fmt, callback, user, loop, mode, flags, out):
+            self.new += 1
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(9)
+            return 0
+
+        def AudioQueueAllocateBuffer(self, queue, size, out):
+            assert size <= len(storage)
+            ctypes.cast(out, ctypes.POINTER(ctypes.POINTER(QueueBuffer)))[0] = ctypes.pointer(
+                holder
+            )
+            return 0
+
+        def AudioQueueEnqueueBuffer(self, queue, buffer, count, descriptions):
+            self.enqueued += 1
+            return 0
+
+        def AudioQueueStart(self, queue, start_time):
+            return 0
+
+        def AudioQueueStop(self, queue, immediate):
+            return 0
+
+        def AudioQueueDispose(self, queue, immediate):
+            self.disposed += 1
+            return 0
+
+    class _Clock:
+        now = 0.0
+
+        @classmethod
+        def monotonic(cls):
+            return cls.now
+
+        @classmethod
+        def sleep(cls, seconds):
+            cls.now += seconds
+
+    backend = _Queue()
+    monkeypatch.setattr("radiko.coreaudio.library", lambda: backend)
+    monkeypatch.setattr(
+        "radiko.coreaudio.inspect", lambda rate: OutputInfo("Fake", rate, "f32", 2, "")
+    )
+    monkeypatch.setattr("radiko.coreaudio.time", _Clock)
+    monkeypatch.setattr(output, "null_sink_enabled", lambda: False)
+    monkeypatch.setattr(output, "host_backend", lambda: "coreaudio")
+    summary = output.probe_silent(3, threading.Event())
+    assert summary.frames == 3 * 48000
+    assert backend.new == 1
+    assert backend.enqueued == 3
+    assert backend.disposed == 1
+
+
+def test_stream_reuses_freed_buffers_after_playback(monkeypatch):
+    import threading
+
+    from radiko.coreaudio import QueueBuffer, Stream
+
+    storage = ctypes.create_string_buffer(48000 * 2 * 4)
+    holder = QueueBuffer()
+    holder.mAudioData = ctypes.cast(storage, ctypes.c_void_p)
+    holder.mAudioDataBytesCapacity = len(storage)
+
+    class _Queue:
+        def __init__(self):
+            self.callback = None
+            self.calls = []
+
+        def AudioQueueNewOutput(self, fmt, callback, user, loop, mode, flags, out):
+            self.callback = callback
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(5)
+            return 0
+
+        def AudioQueueAllocateBuffer(self, queue, size, out):
+            self.calls.append("allocate")
+            ctypes.cast(out, ctypes.POINTER(ctypes.POINTER(QueueBuffer)))[0] = ctypes.pointer(
+                holder
+            )
+            return 0
+
+        def AudioQueueEnqueueBuffer(self, queue, buffer, count, descriptions):
+            self.calls.append("enqueue")
+            self.callback(None, queue, buffer)
+            return 0
+
+        def AudioQueueFreeBuffer(self, queue, buffer):
+            self.calls.append("free")
+            return 0
+
+        def AudioQueueStart(self, queue, start_time):
+            return 0
+
+        def AudioQueueStop(self, queue, immediate):
+            return 0
+
+        def AudioQueueDispose(self, queue, immediate):
+            return 0
+
+    class _Clock:
+        now = 0.0
+
+        @classmethod
+        def monotonic(cls):
+            return cls.now
+
+        @classmethod
+        def sleep(cls, seconds):
+            cls.now += seconds
+
+    backend = _Queue()
+    monkeypatch.setattr("radiko.coreaudio.library", lambda: backend)
+    monkeypatch.setattr("radiko.coreaudio.time", _Clock)
+    stream = Stream(48000, 2, threading.Event())
+    for _ in range(10):
+        stream.write([0.0] * (48000 * 2))
+    stream.close()
+    assert backend.calls.count("allocate") == 10
+    assert backend.calls.count("free") == 10
+    assert stream.outstanding == 0
+
+
+def test_coreaudio_remixes_mono_to_device_stereo(monkeypatch):
+    import threading
+
+    import numpy as np
+
+    import radiko.output as output
+    from radiko.output import OutputInfo
+
+    written = []
+
+    class FakeStream:
+        def __init__(self, rate, channels, stop, step_hook=None):
+            self.channels = channels
+            self.queued_frames = 0
+            self.played_frames = 0
+
+        def write(self, samples, volume=100):
+            written.append(np.asarray(samples).copy())
+            self.queued_frames += len(samples) // self.channels
+            self.played_frames = self.queued_frames
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("radiko.coreaudio.Stream", FakeStream)
+    monkeypatch.setattr(
+        "radiko.coreaudio.inspect", lambda rate: OutputInfo("Fake", rate, "f32", 2, "")
+    )
+    monkeypatch.setattr(output, "null_sink_enabled", lambda: False)
+    monkeypatch.setattr(output, "host_backend", lambda: "coreaudio")
+    for source in (np.zeros(4800, dtype=np.float32), [0.0] * 4800):
+        written.clear()
+        summary = output.play_samples(source, 48000, 1, threading.Event())
+        assert summary.frames == 4800
+        assert len(written[0]) == 9600
