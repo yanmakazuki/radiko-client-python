@@ -425,6 +425,8 @@ def decode_body(data: bytes, encoding: str | None) -> bytes:
 
 def _gunzip_bounded(data: bytes) -> bytes:
     """上限を超えた時点で展開を止め、4MB 以上のバッファを確保しない。"""
+    if not data:
+        raise CatalogError("xml")
     output = bytearray()
     remaining = data
     while remaining:

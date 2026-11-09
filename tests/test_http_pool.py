@@ -28,6 +28,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(body, {"Content-Encoding": "gzip"})
         elif parsed.path == "/bomb":
             self._send(gzip.compress(b"x" * (4 * 1024 * 1024 + 1)), {"Content-Encoding": "gzip"})
+        elif parsed.path == "/empty-gzip":
+            self._send(b"", {"Content-Encoding": "gzip"})
         elif parsed.path == "/close":
             self.close_connection = True
             self._send(b"closed", {"Connection": "close"})
@@ -153,3 +155,18 @@ def test_post_uses_a_fresh_connection_after_a_silent_idle_close(monkeypatch):
     assert reply.status == 200
     assert reply.body == b"posted"
     assert _Handler.accepted == 2
+
+
+def test_empty_gzip_is_rejected_as_xml():
+    with pytest.raises(CatalogError) as direct:
+        decode_body(b"", "gzip")
+    assert direct.value.code == "xml"
+
+    server = _serve()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        with pytest.raises(CatalogError) as fetched:
+            catalog_fetch(f"{base}/empty-gzip")
+    finally:
+        server.shutdown()
+    assert fetched.value.code == "xml"
