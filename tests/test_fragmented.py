@@ -1,7 +1,8 @@
 """実 ADTS ペイロードを箱に詰めて、連続フラグメントと壊れた箱を見る。"""
 
-from radiko.fragmented import FragmentedAacDecoder, synthetic_fragment, synthetic_init
-from radiko.media import AacError, encode_adts_sine, split_adts
+from radiko.fixtures import encode_adts_sine, synthetic_fragment, synthetic_init
+from radiko.fragmented import FragmentedAacDecoder
+from radiko.media import AacError, split_adts
 
 ASC = bytes([0x12, 0x08])
 

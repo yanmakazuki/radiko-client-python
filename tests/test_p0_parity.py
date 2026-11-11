@@ -10,15 +10,10 @@ import pytest
 from radiko import prepare
 from radiko.catalog import parse_endpoints
 from radiko.domain import JST
-from radiko.fragmented import (
-    FragmentedAacDecoder,
-    box,
-    synthetic_fragment,
-    synthetic_init,
-    words,
-)
+from radiko.fixtures import box, encode_adts_sine, synthetic_fragment, synthetic_init, words
+from radiko.fragmented import FragmentedAacDecoder
 from radiko.hls import parse_media_playlist
-from radiko.media import AacError, encode_adts_sine, split_adts
+from radiko.media import AacError, split_adts
 from radiko.prepare import _apply_seek, _validate_seek_window, container_name
 from radiko.storage import MemberSession, Membership
 from radiko.stream import ProbeError

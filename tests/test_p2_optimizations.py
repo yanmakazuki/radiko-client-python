@@ -287,7 +287,8 @@ def test_help_text_is_cached_and_render_calls_visible_once(monkeypatch):
 
 import tracemalloc  # noqa: E402
 
-from radiko.fragmented import _atoms, box, words  # noqa: E402
+from radiko.fixtures import box, words  # noqa: E402
+from radiko.fragmented import _atoms  # noqa: E402
 from radiko.fragmented import _word as atom_word  # noqa: E402
 from radiko.media import _parse_adts, audio_offset, split_adts, validate_mp4  # noqa: E402
 

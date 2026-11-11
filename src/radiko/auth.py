@@ -212,7 +212,7 @@ def partial_key(offset: int, length: int) -> str:
 
 
 def authenticate(fetch, session: MemberSession) -> tuple[dict[str, str], str]:
-    """配信認証。返したヘッダーはログに出さない。"""
+    """配信認証の唯一の実装。返したヘッダーはログに出さない。"""
     headers = {
         "x-radiko-app": "pc_html5",
         "x-radiko-app-version": "0.0.1",
@@ -222,8 +222,11 @@ def authenticate(fetch, session: MemberSession) -> tuple[dict[str, str], str]:
     }
     first = fetch("/v2/api/auth1", headers)
     token = _header(first, "x-radiko-authtoken")
-    offset = int(_header(first, "x-radiko-keyoffset"))
-    length = int(_header(first, "x-radiko-keylength"))
+    try:
+        offset = int(_header(first, "x-radiko-keyoffset"))
+        length = int(_header(first, "x-radiko-keylength"))
+    except ValueError as error:
+        raise ProbeError("auth-format") from error
     headers = {
         **headers,
         "x-radiko-authtoken": token,
@@ -232,10 +235,16 @@ def authenticate(fetch, session: MemberSession) -> tuple[dict[str, str], str]:
         "x-radiko-connection": "wifi",
     }
     second = fetch("/v2/api/auth2", headers)
-    area_raw = second.body.decode().strip().split(",")[0]
+    try:
+        area_raw = second.body.decode().strip().split(",")[0]
+    except UnicodeError as error:
+        raise ProbeError("auth-format") from error
     if not area_raw.startswith("JP"):
         raise ProbeError("outside-japan")
-    number = int(area_raw[2:])
+    try:
+        number = int(area_raw[2:])
+    except ValueError as error:
+        raise ProbeError("outside-japan") from error
     if not 1 <= number <= 47:
         raise ProbeError("outside-japan")
     area = f"JP{number}"

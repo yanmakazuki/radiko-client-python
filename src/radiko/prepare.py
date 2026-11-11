@@ -12,8 +12,7 @@ from urllib.parse import urlencode, urljoin
 
 import numpy as np
 
-from radiko import output
-from radiko.auth import partial_key
+from radiko import auth, output
 from radiko.catalog import CatalogError, parse_endpoints, parse_stations
 from radiko.chapters import ChapterError, parse_chapters
 from radiko.domain import JST, ProgramKey, broadcast_day
@@ -22,6 +21,7 @@ from radiko.hls import HlsCursor, parse_media_playlist
 from radiko.http_client import stream_get, transport_overrides
 from radiko.interactive import InteractiveControl
 from radiko.media import AacError, AdtsDecoder, id3_offset
+from radiko.reauth import ReauthState
 from radiko.storage import MemberSession, Membership
 from radiko.stream import (
     ProbeError,
@@ -241,47 +241,12 @@ def _time_field(value: dict, key: str) -> datetime:
 
 
 def authenticate_stream(session: MemberSession, cancelled) -> tuple[dict[str, str], str]:
-    headers = {
-        "x-radiko-app": "pc_html5",
-        "x-radiko-app-version": "0.0.1",
-        "x-radiko-device": "pc",
-        "x-radiko-user": "dummy_user",
-        "cookie": f"radiko_session={session.token}",
-    }
-    first = stream_get(f"{API}/v2/api/auth1", headers, limit=64 * 1024, cancelled=cancelled)
-    token = _header(first.headers, "x-radiko-authtoken")
-    try:
-        offset = int(_header(first.headers, "x-radiko-keyoffset"))
-        length = int(_header(first.headers, "x-radiko-keylength"))
-        partial = partial_key(offset, length)
-    except (ValueError, ProbeError) as error:
-        raise ProbeError("auth-format") from error
-    second_headers = {
-        **headers,
-        "x-radiko-authtoken": token,
-        "x-radiko-partialkey": partial,
-        "x-radiko-session": session.token,
-        "x-radiko-connection": "wifi",
-    }
-    second = stream_get(f"{API}/v2/api/auth2", second_headers, limit=64 * 1024, cancelled=cancelled)
-    area_raw = second.body.decode().strip().split(",")[0]
-    if not area_raw.startswith("JP"):
-        raise ProbeError("outside-japan")
-    try:
-        number = int(area_raw[2:])
-    except ValueError as error:
-        raise ProbeError("outside-japan") from error
-    if not 1 <= number <= 47:
-        raise ProbeError("outside-japan")
-    area = f"JP{number}"
-    return {"x-radiko-authtoken": token, "x-radiko-areaid": area}, area
+    """stream_get を fetch に載せるだけ。手順は radiko.auth.authenticate に一つだけ。"""
 
+    def fetch(path: str, headers: dict[str, str]):
+        return stream_get(f"{API}{path}", headers, limit=64 * 1024, cancelled=cancelled)
 
-def _header(headers: dict[str, str], name: str) -> str:
-    value = headers.get(name.lower())
-    if not value:
-        raise ProbeError("auth-format")
-    return value
+    return auth.authenticate(fetch, session)
 
 
 def prepare(
@@ -936,9 +901,7 @@ def _play_station(
             seek_prep = None
         if position:
             _validate_seek_window(media, program, position)
-        from radiko.reauth import ReauthState
-
-        reauth = ReauthState(session, cancelled, now=reauth_now)
+        reauth = ReauthState(session, cancelled, authenticate_stream, now=reauth_now)
 
         duration = (program.end - program.start).total_seconds()
         control = InteractiveControl(duration, mode, station)

@@ -13,7 +13,8 @@ import pytest
 
 from radiko import prepare, storage
 from radiko.domain import JST
-from radiko.fragmented import _take, box, words
+from radiko.fixtures import box, words
+from radiko.fragmented import _take
 from radiko.media import _walk
 from radiko.storage import MemberSession
 
@@ -86,9 +87,7 @@ def test_counters_are_returned_instead_of_mutated_lists():
     assert _take(words(7), 0)[1] == 4
 
 
-def test_no_unexpected_function_level_imports():
-    allowed = {"radiko.reauth", "radiko.coreaudio", "radiko_client.cli", "termios", "tty"}
-
+def test_no_function_level_imports_remain():
     class Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
             self.depth = 0
@@ -114,20 +113,21 @@ def test_no_unexpected_function_level_imports():
         visitor = Visitor()
         visitor.visit(ast.parse(path.read_text()))
         found.extend(visitor.modules)
-    unexpected = sorted(set(found) - allowed)
-    assert unexpected == []
-    assert allowed <= set(found)
+    assert found == []
 
 
 def test_every_module_imports_alone_without_a_cycle():
     modules = [
+        "radiko.audio",
         "radiko.auth",
         "radiko.catalog",
         "radiko.coreaudio",
+        "radiko.fixtures",
         "radiko.fragmented",
         "radiko.http_client",
         "radiko.prepare",
         "radiko.reauth",
+        "radiko_client.programs",
         "radiko_client.tui",
         "radiko_client.cli",
     ]
@@ -142,6 +142,14 @@ def test_every_module_imports_alone_without_a_cycle():
 
 
 def test_dead_helpers_and_single_element_imports_are_gone():
+    import importlib.util
+
+    from radiko import fragmented, media
+
+    assert importlib.util.find_spec("radiko.player") is None
+    assert not hasattr(fragmented, "synthetic_init")
+    assert not hasattr(fragmented, "synthetic_fragment")
+    assert not hasattr(media, "encode_adts_sine")
     assert not hasattr(prepare, "_unused_split")
     assert not hasattr(prepare, "timedelta_utc")
     assert not hasattr(storage, "unicat")

@@ -70,6 +70,14 @@
 - `RADIKO_ALSA_LOG=1` のときだけ ALSA の診断を残す。
 - `RADIKO_CATALOG_ORIGIN` と `RADIKO_AUTH_ORIGIN` は `http://127.0.0.1:ポート` だけを許す。Rust のデバッグビルドにある抜け道に相当し、リリースバイナリとの差として残す。
 
+## モジュール境界
+
+- 配信認証の実装は `radiko.auth.authenticate` の1つだけ。`radiko.prepare.authenticate_stream` は `stream_get` を `fetch` に載せるアダプタで、`radiko.reauth` は `refresh` を注入されて呼ぶ。
+- 音声出力の型（`OutputError` / `OutputInfo` / `OutputCapability` / `OutputSummary`）は `radiko.audio`。`radiko.output` と `radiko.coreaudio` は同じ型を共有し、`radiko.output` は後方互換のため再エクスポートする。
+- 試験用の合成データ（`box` / `words` / `synthetic_init` / `synthetic_fragment` / `encode_adts_sine`）は `radiko.fixtures` にだけ置く。本番の `fragmented` / `media` は持たない。
+- `programs` の引数解析と検索条件は `radiko_client.programs` に集約し、CLI と TUI が同じ実装を使う。簡易再生エンジン `radiko.player` は削除した。
+- 関数内 import は無い。`tests/test_p3_cleanup.py` が固定する。
+
 ## オフライン CLI の突き合わせ
 
 `a7eaefa56729161e449a03ab2c0d2872429d8e87` を Rust 1.85.0 でビルドした `radiko-client` と、同じ引数の Python プロセスを比べた。ヘルプ、不正な引数、`session` / `logout` / `login`、`searches` の保存・表示・一覧・復元・削除、`inspect-chapters` は、終了コードと標準出力と標準エラーが一致した。通信が要るコマンドと、TUI のセルは比べていない。CI の `Compare offline CLI with pinned Rust` が、同じ SHA をその場でビルドして同じ比較を行う。バイナリのダウンロードはしない。通常の pytest ジョブだけでは、そのバイナリが無いので比較は飛ばす。
@@ -113,6 +121,6 @@ TUI のキーは状態機械で受け、疑似端末は `?` と `q` と属性の
 
 ## まだ無いもの
 
-- macOS で AudioQueue が実際に音を出すこと。コールバックの寿命は偽のライブラリで見た
+- macOS で AudioQueue が実際に音を出すこと。コールバックの寿命・停滞検知・デバイス名の切り詰め・ALSA の XRUN 回復は偽のライブラリで見た
 - Ratatui の全セル。行の割付と再生行の文面は合わせた。`draw` は外部から呼べない
 - 実アカウントと実 radiko の再生

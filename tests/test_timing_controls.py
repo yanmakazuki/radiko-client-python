@@ -59,7 +59,12 @@ def test_reconnect_budget_uses_the_simulated_clock_and_stops_at_five_minutes():
 
 def test_reauth_interval_is_simulated_and_reuses_the_token_inside_twenty_seconds():
     clock = {"t": 0.0}
-    state = ReauthState(MemberSession("synthetic-token"), lambda: False, now=lambda: clock["t"])
+    state = ReauthState(
+        MemberSession("synthetic-token"),
+        lambda: False,
+        lambda _session, _cancelled: ({}, "JP13"),
+        now=lambda: clock["t"],
+    )
     state.last = 0.0
     headers = {"x-radiko-authtoken": "held-token"}
     clock["t"] = 19.999

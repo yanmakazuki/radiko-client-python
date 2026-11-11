@@ -14,7 +14,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from radiko.domain import JST
-from radiko.media import encode_adts_sine, split_adts
+from radiko.fixtures import encode_adts_sine
+from radiko.media import split_adts
 from radiko.storage import MemberSession, SessionStore
 from radiko.urls import append_query, transport_url, trusted
 from radiko_client.cli import main

@@ -8,8 +8,10 @@ import queue
 import select
 import signal
 import sys
+import termios
 import threading
 import time
+import tty
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,6 +45,7 @@ from radiko.storage import SearchStore, SessionStore, default_data_dir
 from radiko.stream import validate_station
 from radiko.text import cluster_width, display_width, graphemes
 from radiko_client.io import stderr_ln, stdout_ln
+from radiko_client.programs import build_criteria, parse_program_request
 
 DEVICE_NOTE = "出力機器は OS の既定に従います。アプリ内では選べません"
 DEVICE_GUIDANCE = "OSのサウンド設定を確認し、d で閉じてから Enter で再生し直してください"
@@ -1833,8 +1836,6 @@ def startup_state(args: list[str], data_dir: Path | None, now: datetime, offline
         except Exception as error:
             notice = f"条件保存先の取得失敗: {error}"
     if args:
-        from radiko_client.cli import build_criteria
-
         return build_criteria(args, now), store, notice
     if store is None:
         return SearchCriteria.initial(now), store, notice
@@ -1858,8 +1859,6 @@ def run(args: list[str], data_dir: Path | None) -> None:
         raise RuntimeError("TUIでは表示用CLIオプションは使用できません")
     now = datetime.now().astimezone()
     if rest:
-        from radiko_client.cli import parse_program_request
-
         parse_program_request(rest, now)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError("tuiは対話端末で実行してください")
@@ -1893,9 +1892,6 @@ def run(args: list[str], data_dir: Path | None) -> None:
 
 
 def _terminal_loop(screen: Screen) -> None:
-    import termios
-    import tty
-
     fd = sys.stdin.fileno()
     previous = termios.tcgetattr(fd)
     before = signal.getsignal(signal.SIGINT)
