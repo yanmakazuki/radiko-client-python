@@ -49,9 +49,10 @@ def test_session_recheck_reads_the_saved_contract(tmp_path, monkeypatch):
     screen = Screen([], NOW, offline=False, data_dir=tmp_path)
     try:
         screen.handle("a")
-        from radiko_client.tui import perform_pending
+        from radiko_client.tui import perform_pending, wait_auth
 
         perform_pending(screen)
+        wait_auth(screen)
     finally:
         server.shutdown()
     assert screen.auth == "signed-in"

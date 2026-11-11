@@ -10,6 +10,7 @@ import signal
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.resources import files
@@ -476,6 +477,9 @@ class Screen:
     seconds_error: str = ""
     play_mode: str = "timefree"
     auth_refresh: bool = False
+    auth_start: bool = False
+    auth_generation: int = 0
+    auth_box: object | None = None
     data_dir: Path | None = None
     criteria: SearchCriteria | None = None
     chapter_summaries: list[str] = field(default_factory=list)
@@ -804,8 +808,10 @@ class Screen:
         lines.append(shown)
         return "\n".join(lines)
 
-    def _open_filter(self) -> None:
-        criteria = self.ensure_criteria()
+    def _open_filter(self, criteria: SearchCriteria | None = None) -> None:
+        # 呼び出し元の条件を下書きに入れるだけ。確定は編集画面の Enter。
+        if criteria is None:
+            criteria = self.ensure_criteria()
         end = ""
         if criteria.range.start != criteria.range.end:
             end = criteria.range.end.strftime("%Y%m%d")
@@ -940,7 +946,11 @@ class Screen:
             form.error = ""
             return
         size = sum(len(item.encode()) + 1 for item in form.picker_selected)
-        if not class_id.strip() or len(class_id) > 128 or any(ord(c) < 32 for c in class_id):
+        if (
+            not class_id.strip()
+            or len(class_id.encode()) > 128
+            or any(unicodedata.category(char) == "Cc" for char in class_id)
+        ):
             form.error = "この候補の分類IDは不正なため選択できません"
         elif size + len(class_id.encode()) > 4096:
             form.error = "分類IDの合計は4096バイトまでです。選択を減らしてください"
@@ -1360,10 +1370,6 @@ class Screen:
                 return
             name = names[min(self.named_index, len(names) - 1)]
             criteria = self.named[name]
-            self.criteria = criteria
-            self.committed = criteria.filter
-            if criteria.scope.kind == "station" and isinstance(criteria.scope.value, str):
-                self.station_id = criteria.scope.value
             self._set_notice(
                 NoticeLevel.INFO,
                 f"「{name}」を呼び出しました "
@@ -1372,7 +1378,8 @@ class Screen:
                 "（検索はまだ行いません）",
                 sticky=False,
             )
-            self._open_filter()
+            # Rust の Recalled 同様、確定条件は変えず編集画面の下書きだけを作る。
+            self._open_filter(criteria)
 
     def _save_named(self) -> None:
         name = self.draft_name.value
@@ -1531,9 +1538,12 @@ def perform_pending(screen: Screen) -> None:
         screen.play_request = None
         screen.logout_request = False
         return
-    if screen.auth_refresh:
+    if screen.auth_start or screen.auth_refresh:
+        # 起動時（auth_start）はヘッダの認証表示だけで、通知は上書きしない。
+        show_notice = screen.auth_refresh
+        screen.auth_start = False
         screen.auth_refresh = False
-        _refresh_auth(screen)
+        _start_auth(screen, show_notice)
     if screen.fetch_programs:
         screen.fetch_programs = False
         _start_job(screen, "fetch", screen.ensure_criteria())
@@ -1542,6 +1552,7 @@ def perform_pending(screen: Screen) -> None:
 
         store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
         store.delete()
+        screen.auth_generation += 1
         screen.auth = "signed-out"
         screen._set_notice(NoticeLevel.INFO, "ローカルのセッションを削除しました", False)
     if screen.login_request is not None:
@@ -1552,6 +1563,7 @@ def perform_pending(screen: Screen) -> None:
             session, _membership = MemberClient.create().login(mail, password)
             store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
             store.save(session)
+            screen.auth_generation += 1
             screen.auth = "signed-in"
             screen._set_notice(NoticeLevel.INFO, "ログインし、セッションを保存しました", False)
         except Exception as error:
@@ -1573,25 +1585,19 @@ def perform_pending(screen: Screen) -> None:
         _start_job(screen, "play", (program, offset, screen.play_mode, screen.now, screen.data_dir))
 
 
-def _refresh_auth(screen: Screen) -> None:
-    store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
+def _check_auth(data_dir: Path | None) -> tuple[str, str, bool]:
+    """保存セッションの確認。画面は触らず、(表示, 通知文, エラーか) だけを返す。"""
+    store = SessionStore(data_dir) if data_dir else SessionStore.default()
     try:
         session = store.load()
     except Exception as error:
-        screen.auth = "signed-out"
-        screen._set_notice(NoticeLevel.ERROR, str(error), True)
-        return
+        return "signed-out", str(error), True
     if session is None:
-        screen.auth = "signed-out"
-        screen._set_notice(NoticeLevel.INFO, "未ログインです。loginでログインしてください", False)
-        return
+        return "signed-out", "未ログインです。loginでログインしてください", False
     try:
         membership = MemberClient.create().check(session)
     except AuthError as error:
-        screen.auth = "signed-out"
-        screen._set_notice(NoticeLevel.ERROR, str(error), True)
-        return
-    screen.auth = "signed-in"
+        return "signed-out", str(error), True
 
     def label(value: bool | None) -> str:
         if value is True:
@@ -1600,12 +1606,62 @@ def _refresh_auth(screen: Screen) -> None:
             return "なし"
         return "未確認"
 
-    screen._set_notice(
-        NoticeLevel.INFO,
+    return (
+        "signed-in",
         f"ログイン有効 / エリアフリー: {label(membership.area_free)} / "
         f"タイムフリー30: {label(membership.time_free_30)}",
         False,
     )
+
+
+def _start_auth(screen: Screen, show_notice: bool) -> None:
+    """セッション確認は別スレッドへ。初回の描画とキーを待たせない（Rust の AuthService 相当）。"""
+    screen.auth_generation += 1
+    generation = screen.auth_generation
+    box: queue.Queue = queue.Queue(1)
+    screen.auth_box = box
+
+    def work() -> None:
+        try:
+            box.put((generation, ("ok", _check_auth(screen.data_dir), show_notice)))
+        except Exception as error:
+            box.put((generation, ("err", error, show_notice)))
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def poll_auth(screen: Screen) -> None:
+    box = screen.auth_box
+    if box is None:
+        return
+    try:
+        generation, item = box.get_nowait()
+    except queue.Empty:
+        return
+    if generation != screen.auth_generation:
+        screen.auth_box = None
+        return
+    screen.auth_box = None
+    screen.revision += 1
+    kind, payload, show_notice = item
+    if kind == "err":
+        screen.auth = "signed-out"
+        screen._set_notice(NoticeLevel.ERROR, str(payload), True)
+        return
+    label, message, failed = payload
+    screen.auth = label
+    if failed or show_notice:
+        screen._set_notice(NoticeLevel.ERROR if failed else NoticeLevel.INFO, message, failed)
+
+
+def wait_auth(screen: Screen, timeout: float = 8.0) -> None:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        poll_auth(screen)
+        if screen.auth_box is None:
+            return
+        time.sleep(0.02)
+    poll_auth(screen)
 
 
 def _fetch_programs(criteria: SearchCriteria, cancel) -> dict:
@@ -1788,7 +1844,8 @@ def startup_state(args: list[str], data_dir: Path | None, now: datetime, offline
             library.last.restore_startup(now) if library.last else SearchCriteria.initial(now)
         )
     except Exception as error:
-        return SearchCriteria.initial(now), store, f"条件復元失敗: {error}"
+        # 壊れた searches.json は終了時に上書きしない（programs --restore と同じ扱い）。
+        return SearchCriteria.initial(now), None, f"条件復元失敗: {error}"
     return criteria, store, notice
 
 
@@ -1823,7 +1880,7 @@ def run(args: list[str], data_dir: Path | None) -> None:
         screen.notice = Notice(NoticeLevel.INFO, OFFLINE_NOTICE, False, 0)
     else:
         # 起動直後のセッション確認と初期検索。どちらも service_loop の初回に流れる。
-        screen.auth_refresh = True
+        screen.auth_start = True
         screen._commit_search()
     try:
         _terminal_loop(screen)
@@ -1869,6 +1926,7 @@ def service_loop(screen: Screen, read_key, paint=None) -> None:
         screen.poll_device()
         perform_pending(screen)
         poll_jobs(screen)
+        poll_auth(screen)
         if paint is not None and screen.revision != painted:
             paint(screen)
             painted = screen.revision

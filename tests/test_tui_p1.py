@@ -68,7 +68,7 @@ def test_run_starts_with_a_fetch_and_a_session_check_then_saves_last(tmp_path, m
 
     assert len(captured) == 1
     screen = captured[0]
-    assert screen.auth_refresh is True
+    assert screen.auth_start is True
     assert screen.fetch_programs is True
     assert screen.generation == 1
     assert screen.criteria is not None
@@ -276,3 +276,103 @@ def test_commands_and_stop_reach_the_running_play_job(tmp_path, monkeypatch):
             worker.join(5)
         server.shutdown()
     assert not worker.is_alive()
+
+
+def test_named_recall_keeps_committed_criteria_until_confirmed(tmp_path):
+    SearchStore(tmp_path).save_named("生活", _criteria("生活"))
+    screen = Screen([], NOW, offline=False, data_dir=tmp_path)
+    screen.criteria = _criteria()
+    screen.committed = screen.criteria.filter
+    before_criteria = screen.criteria
+    before_committed = screen.committed
+
+    screen.handle("b")
+    screen.handle("enter")
+    assert screen.area == "filter"
+    assert screen.filter_form is not None
+    assert screen.filter_form.keyword.value == "生活"
+    assert screen.criteria is before_criteria
+    assert screen.committed is before_committed
+    assert screen.committed.keyword is None
+    assert screen.fetch_programs is False
+
+    screen.handle("esc")
+    assert screen.area == "list"
+    assert screen.criteria is before_criteria
+    assert screen.committed.keyword is None
+    assert "キーワード: 指定なし" in "\n".join(screen.render())
+
+
+def test_corrupt_searches_file_is_reported_and_never_clobbered(tmp_path, monkeypatch):
+    path = tmp_path / "searches.json"
+    path.write_text("{broken", encoding="utf-8")
+    criteria, store, notice = startup_state([], tmp_path, NOW, False)
+    assert store is None
+    assert notice.startswith("条件復元失敗")
+    assert criteria.filter.keyword is None
+
+    captured: list[Screen] = []
+    monkeypatch.setattr(tui, "_terminal_loop", lambda screen: captured.append(screen))
+    monkeypatch.setattr(tui.sys, "stdin", type("TTY", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(tui.sys, "stdout", type("TTY", (), {"isatty": lambda self: True})())
+    tui.run([], tmp_path)
+    assert len(captured) == 1
+    assert path.read_text(encoding="utf-8") == "{broken"
+
+
+def test_classification_picker_rejects_control_characters():
+    programs = [
+        _program(
+            "番組",
+            NOW - timedelta(hours=1),
+            NOW,
+            program_genres=[Classification("C\x85x", "制御文字")],
+        )
+    ]
+    screen = Screen(programs, NOW, offline=True)
+    screen.handle("f")
+    for _ in range(3):
+        screen.handle("tab")
+    screen.handle("f2")
+    screen.handle("j")
+    screen.handle("j")
+    screen.handle(" ")
+    form = screen.filter_form
+    assert form is not None
+    assert form.picker_selected == set()
+    assert "不正なため選択できません" in form.error
+    screen.handle("enter")
+    assert form.genres.value == ""
+
+
+def test_session_check_runs_off_the_main_loop(tmp_path, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_check(data_dir):
+        started.set()
+        release.wait(5)
+        return "signed-in", "ログイン有効", False
+
+    monkeypatch.setattr(tui, "_check_auth", slow_check)
+    screen = Screen([], NOW, offline=False, data_dir=tmp_path)
+    screen.auth_refresh = True
+    began = time.monotonic()
+    tui.perform_pending(screen)
+    assert time.monotonic() - began < 0.3
+    assert started.wait(2)
+    release.set()
+    tui.wait_auth(screen)
+    assert screen.auth == "signed-in"
+    assert screen.notice is not None
+    assert screen.notice.text == "ログイン有効"
+
+
+def test_startup_auth_updates_the_header_without_a_notice(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui, "_check_auth", lambda _dir: ("signed-in", "ログイン有効", False))
+    screen = Screen([], NOW, offline=False, data_dir=tmp_path)
+    screen.auth_start = True
+    tui.perform_pending(screen)
+    tui.wait_auth(screen)
+    assert screen.auth == "signed-in"
+    assert screen.notice is None
