@@ -301,11 +301,12 @@ def test_named_recall_uses_the_saved_period(tmp_path):
 
     def script(collected: bytes, master: int, process: subprocess.Popen) -> None:
         if not sent["go"] and b"radiko-client" in collected:
-            os.write(master, "b生活\rr".encode())
+            # b で一覧、Enter で条件を編集画面へ、もう一度 Enter で確定して通信する。
+            os.write(master, b"b\r\r")
             sent["go"] = True
-        if "/v3/program/station/date/20261015/TBS.xml" in _Server.paths:
-            os.write(master, b"q")
+        if "/v3/program/station/date/20261015/TBS.xml" in _Server.paths and not sent["done"]:
             sent["done"] = True
+            os.write(master, b"q")
 
     try:
         code, collected = _pty(["tui"], env, script)
