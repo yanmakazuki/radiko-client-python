@@ -28,6 +28,7 @@ from radiko.domain import (
     BroadcastRange,
     BroadcastStatus,
     Filter,
+    ObservedClassifications,
     Program,
     Scope,
     SearchCriteria,
@@ -40,7 +41,7 @@ from radiko.prepare import inspect_remote_chapters, play_station
 from radiko.storage import SearchStore, SessionStore, default_data_dir
 from radiko.stream import validate_station
 from radiko.text import cluster_width, display_width, graphemes
-from radiko_client.io import stdout_ln
+from radiko_client.io import stderr_ln, stdout_ln
 
 DEVICE_NOTE = "出力機器は OS の既定に従います。アプリ内では選べません"
 DEVICE_GUIDANCE = "OSのサウンド設定を確認し、d で閉じてから Enter で再生し直してください"
@@ -65,35 +66,98 @@ DIALOG_AREAS = {"help", "device", "failures", "named", "chapters", "logout"}
 AREA_CHOICES = ["全国", *[f"JP{number}" for number in range(1, 48)]]
 
 
+FIELD_LIMITS = [8, 8, 512, 4096, 4096, 1024]
+
+
+def _classes(ids: list[str], empty: bool) -> str:
+    names = list(ids)
+    if empty:
+        names.append("未分類")
+    return ",".join(names) if names else "指定なし"
+
+
+def criteria_scope(criteria: SearchCriteria) -> str:
+    scope = criteria.scope
+    if scope.kind == "nationwide":
+        return "全国"
+    if scope.kind == "station":
+        return scope.value if isinstance(scope.value, str) else "指定なし"
+    return ",".join(scope.value or []) or "指定なし"
+
+
+def filter_scope(criteria: SearchCriteria) -> str:
+    """編集画面の地域欄。局は `局:` を付けて戻せる形にする。"""
+    scope = criteria.scope
+    if scope.kind == "station" and isinstance(scope.value, str):
+        return f"局:{scope.value}"
+    return criteria_scope(criteria)
+
+
 @dataclass
 class FilterForm:
     """全条件。F2 は検索せず、Enter で条件を確定する。"""
 
-    start: str
-    end: str
-    scope: str
-    genres: str = ""
-    personalities: str = ""
-    keyword: str = ""
+    start: LineEditor
+    end: LineEditor
+    scope: LineEditor
+    genres: LineEditor
+    personalities: LineEditor
+    keyword: LineEditor
     unclassified_program: bool = False
     unclassified_personality: bool = False
     focus: int = 0
     error: str = ""
     picker: list[str] | None = None
+    picker_ids: list[str] | None = None
+    picker_selected: set[str] = field(default_factory=set)
+    picker_unclassified: bool = False
     picker_index: int = 0
     picker_field: int | None = None
+    observed: ObservedClassifications = field(
+        default_factory=lambda: ObservedClassifications([], [], 0, 0)
+    )
+
+    def field(self, index: int) -> LineEditor:
+        return (self.start, self.end, self.scope, self.genres, self.personalities, self.keyword)[
+            index
+        ]
+
+    def set_field(self, index: int, text: str) -> None:
+        editor = self.field(index)
+        editor.value = text
+        editor.cursor = len(text.encode())
+
+    def picker_rows(self) -> list[str]:
+        if self.picker is None:
+            return []
+        if self.picker_ids is None:
+            return [
+                f"{'>' if index == self.picker_index else ' '} {label}"
+                for index, label in enumerate(self.picker)
+            ]
+        clear = not self.picker_selected and not self.picker_unclassified
+        rows = [
+            f"{'>' if self.picker_index == 0 else ' '} [{'x' if clear else ' '}] 全て（分類指定なし）",
+            f"{'>' if self.picker_index == 1 else ' '} "
+            f"[{'x' if self.picker_unclassified else ' '}] 未分類（選択IDとOR）",
+        ]
+        for index, (label, class_id) in enumerate(zip(self.picker, self.picker_ids), start=2):
+            checked = "x" if class_id in self.picker_selected else " "
+            rows.append(f"{'>' if self.picker_index == index else ' '} [{checked}] {label}")
+        return rows
 
     def line(self) -> str:
         if self.picker is not None:
-            current = self.picker[self.picker_index]
-            return f"名称選択: {current}\n上下 選択 / Enter 条件へ反映（検索しません） / Esc 取消"
+            body = "\n".join(self.picker_rows())
+            hint = "上下 選択 / Space 切替 / Enter 条件へ反映（検索しません） / Esc 取消"
+            return f"{body}\n{self.error}\n{hint}"
         labels = [
-            f"開始: {self.start}",
-            f"終了: {self.end or '（開始と同じ）'}",
-            f"範囲: {self.scope}",
-            f"番組ジャンル: {self.genres or '指定なし'}",
-            f"出演者分類: {self.personalities or '指定なし'}",
-            f"キーワード: {self.keyword or '指定なし'}",
+            f"開始: {self.start.value}",
+            f"終了: {self.end.value or '（開始と同じ）'}",
+            f"範囲: {self.scope.value}",
+            f"番組ジャンル: {self.genres.value or '指定なし'}",
+            f"出演者分類: {self.personalities.value or '指定なし'}",
+            f"キーワード: {self.keyword.value or '指定なし'}",
             f"番組未分類: {'オン' if self.unclassified_program else 'オフ'}",
             f"出演者未分類: {'オン' if self.unclassified_personality else 'オフ'}",
             "観測した分類",
@@ -105,9 +169,9 @@ class FilterForm:
         return f"{body}\n{self.error}\n{hint}"
 
     def criteria(self) -> SearchCriteria:
-        start = parse_day(self.start)
-        end = start if not self.end.strip() else parse_day(self.end.strip())
-        scope_text = self.scope.strip()
+        start = parse_day(self.start.value)
+        end = start if not self.end.value.strip() else parse_day(self.end.value.strip())
+        scope_text = self.scope.value.strip()
         if scope_text in {"全国", "all", "ALL"}:
             scope = Scope.nationwide()
         elif scope_text.startswith("局:") or scope_text.lower().startswith("station:"):
@@ -116,9 +180,11 @@ class FilterForm:
         else:
             areas = [item.strip() for item in scope_text.split(",") if item.strip()]
             scope = Scope.areas(areas)
-        keyword = self.keyword.strip() or None
-        genres = [item.strip() for item in self.genres.split(",") if item.strip()]
-        personalities = [item.strip() for item in self.personalities.split(",") if item.strip()]
+        keyword = self.keyword.value.strip() or None
+        genres = [item.strip() for item in self.genres.value.split(",") if item.strip()]
+        personalities = [
+            item.strip() for item in self.personalities.value.split(",") if item.strip()
+        ]
         return SearchCriteria.create(
             scope,
             BroadcastRange.new(start, end),
@@ -387,6 +453,9 @@ class Screen:
     schedule_failures: list[tuple[str, str, str]] = field(default_factory=list)
     invalid_count: int = 0
     named: dict[str, SearchCriteria] = field(default_factory=dict)
+    named_mode: str = "browse"
+    named_index: int = 0
+    named_target: str = ""
     offline: bool = False
     quit: bool = False
     revision: int = 0
@@ -417,6 +486,7 @@ class Screen:
     job_cancel: object | None = None
     job_box: object | None = None
     job_thread: object | None = None
+    play_commands: object | None = None
 
     def _quit(self) -> None:
         self.quit = True
@@ -505,19 +575,25 @@ class Screen:
         elif key == " ":
             if self.playing:
                 self.paused = not self.paused
+                self._command("pause" if self.paused else "resume")
                 self._set_notice(
                     NoticeLevel.INFO, "一時停止" if self.paused else "再生中", sticky=False
                 )
         elif key in {"+", "-"}:
             self.volume = min(100, self.volume + 5) if key == "+" else max(0, self.volume - 5)
+            self._command(f"volume {self.volume}")
         elif key == "s":
+            if self.playing and self.job_cancel is not None:
+                self.job_cancel.set()
             self.playing = None
             self.paused = False
             self._set_notice(NoticeLevel.INFO, "停止しました", sticky=False)
         elif key == "left":
-            self._seek(-15)
+            if self._seek(-15) and self.play_mode == "timefree":
+                self._command("-15")
         elif key == "right":
-            self._seek(15)
+            if self._seek(15) and self.play_mode == "timefree":
+                self._command("+15")
         elif key == "g":
             self._open_seconds()
         elif key == "l":
@@ -573,6 +649,8 @@ class Screen:
             return self._framed("位置指定", self._seconds_body())
         if self.area == "filter" and self.filter_form is not None:
             return self._framed("全条件", self.filter_form.line())
+        if self.area == "named":
+            return self._framed("名前付き検索条件", self._named_body())
         if self.area == "login":
             return self._framed("ログイン（パスワード非表示）", self._login_body())
         if self.area == "chapters":
@@ -581,7 +659,7 @@ class Screen:
             return self._overlay("ログアウトしますか（y で確定）")
         compact = self.height <= COMPACT_HEIGHT
         rows = self.visible()
-        lines = self._header(compact, rows)
+        lines = self._header(compact)
         title = (
             "番組一覧"
             if compact
@@ -632,10 +710,8 @@ class Screen:
         shown.extend("" for _ in range(self.height - len(shown)))
         return shown
 
-    def _scope(self, rows: list[Program]) -> str:
-        if not rows:
-            return "指定なし"
-        return rows[0].key.station_id
+    def _scope(self) -> str:
+        return criteria_scope(self.ensure_criteria())
 
     def _mode_label(self) -> str:
         mode = "ライブ（放送中のみ）" if self.live else "タイムフリー"
@@ -643,19 +719,25 @@ class Screen:
             return f"{mode} / オフライン確認"
         return mode
 
-    def _header(self, compact: bool, rows: list[Program]) -> list[str]:
-        scope = self._scope(rows)
-        day = broadcast_day(self.now)
+    def _header(self, compact: bool) -> list[str]:
+        criteria = self.ensure_criteria()
+        scope = self._scope()
+        start = criteria.range.start
+        end = criteria.range.end
         if compact:
             return [
-                truncate_width(f"{self._mode_label()} / {scope} / {day}〜{day}", self.width),
+                truncate_width(f"{self._mode_label()} / {scope} / {start}〜{end}", self.width),
                 truncate_width(OFFLINE_NOTICE if self.offline else self.auth, self.width),
             ]
+        criteria_filter = criteria.filter
         lines = [
             "┌ radiko-client",
-            f"│ {self._mode_label()} / {scope} / {day}〜{day}（日本時間・05:00区切り）",
-            "│ キーワード: 指定なし",
-            "│ 番組ジャンル: 指定なし / 出演者分類: 指定なし",
+            f"│ {self._mode_label()} / {scope} / {start}〜{end}（日本時間・05:00区切り）",
+            f"│ キーワード: {criteria_filter.keyword or '指定なし'}",
+            "│ 番組ジャンル: "
+            f"{_classes(list(criteria_filter.program_genres), criteria_filter.unclassified_program)}"
+            " / 出演者分類: "
+            f"{_classes(list(criteria_filter.personality_genres), criteria_filter.unclassified_personality)}",
             f"│ 認証: {self.auth}",
             "│ " + (OFFLINE_NOTICE if self.offline else ""),
             "└",
@@ -724,26 +806,20 @@ class Screen:
 
     def _open_filter(self) -> None:
         criteria = self.ensure_criteria()
-        scope = criteria.scope
-        if scope.kind == "nationwide":
-            scope_text = "全国"
-        elif scope.kind == "station":
-            scope_text = f"局:{scope.value}"
-        else:
-            scope_text = ",".join(scope.value or [])
         end = ""
         if criteria.range.start != criteria.range.end:
             end = criteria.range.end.strftime("%Y%m%d")
         self.filter_form = FilterForm(
-            criteria.range.start.strftime("%Y%m%d"),
-            end,
-            scope_text,
-            ",".join(criteria.filter.program_genres),
-            ",".join(criteria.filter.personality_genres),
-            criteria.filter.keyword or "",
+            LineEditor.new(criteria.range.start.strftime("%Y%m%d"), FIELD_LIMITS[0]),
+            LineEditor.new(end, FIELD_LIMITS[1]),
+            LineEditor.new(filter_scope(criteria), FIELD_LIMITS[2]),
+            LineEditor.new(",".join(criteria.filter.program_genres), FIELD_LIMITS[3]),
+            LineEditor.new(",".join(criteria.filter.personality_genres), FIELD_LIMITS[4]),
+            LineEditor.new(criteria.filter.keyword or "", FIELD_LIMITS[5]),
             criteria.filter.unclassified_program,
             criteria.filter.unclassified_personality,
         )
+        self.filter_form.observed = ObservedClassifications.collect(self.programs)
         self.area = "filter"
 
     def _filter_key(self, key: str) -> None:
@@ -752,24 +828,49 @@ class Screen:
             self.area = "list"
             return
         if form.picker is not None:
+            rows = len(form.picker_rows())
             if key in {"esc", "q"}:
                 form.picker = None
+                form.picker_ids = None
                 return
             if key in {"j", "down"}:
-                form.picker_index = min(form.picker_index + 1, len(form.picker) - 1)
+                form.picker_index = min(form.picker_index + 1, rows - 1)
                 return
             if key in {"k", "up"}:
                 form.picker_index = max(form.picker_index - 1, 0)
                 return
+            if key == "home":
+                form.picker_index = 0
+                return
+            if key == "end":
+                form.picker_index = rows - 1
+                return
+            if key == " " and form.picker_ids is not None:
+                if form.picker_index == 0:
+                    form.picker_selected.clear()
+                    form.picker_unclassified = False
+                    form.error = ""
+                elif form.picker_index == 1:
+                    form.picker_unclassified = not form.picker_unclassified
+                    form.error = ""
+                else:
+                    self._toggle_class(form, form.picker_index - 2)
+                return
             if key == "enter":
-                chosen = form.picker[form.picker_index]
-                if form.picker_field == 2:
-                    form.scope = chosen
-                elif form.picker_field == 3:
-                    form.genres = chosen.split(" ", 1)[0]
-                elif form.picker_field == 4:
-                    form.personalities = chosen.split(" ", 1)[0]
+                if form.picker_ids is None:
+                    if form.picker_field == 2:
+                        form.set_field(2, form.picker[form.picker_index])
+                    form.picker = None
+                    return
+                ids = sorted(form.picker_selected)
+                axis = 0 if form.picker_field == 3 else 1
+                form.set_field(3 + axis, ",".join(ids))
+                if axis == 0:
+                    form.unclassified_program = form.picker_unclassified
+                else:
+                    form.unclassified_personality = form.picker_unclassified
                 form.picker = None
+                form.picker_ids = None
             return
         if key == "esc":
             self.area = "list"
@@ -784,12 +885,11 @@ class Screen:
         if key == "f2":
             if form.focus == 2:
                 form.picker = list(AREA_CHOICES)
+                form.picker_ids = None
                 form.picker_index = 0
                 form.picker_field = 2
             elif form.focus in {3, 4}:
-                form.picker = ["UNKNOWN 未知分類", "C999 出演分類"]
-                form.picker_index = 0
-                form.picker_field = form.focus
+                self._open_class_picker(form, form.focus)
             return
         if key == " " and form.focus == 6:
             form.unclassified_program = not form.unclassified_program
@@ -800,30 +900,53 @@ class Screen:
         if key == "enter":
             try:
                 self.criteria = form.criteria()
-            except (ValueError, Exception) as error:
+            except Exception as error:
                 form.error = str(error)
                 return
             self.committed = self.criteria.filter
             self.filter_form = None
             self._commit_search()
             return
-        target = {
-            0: "start",
-            1: "end",
-            2: "scope",
-            3: "genres",
-            4: "personalities",
-            5: "keyword",
-        }.get(form.focus)
-        if target is None:
+        if form.focus <= 5:
+            form.field(form.focus).handle(key)
+
+    def _open_class_picker(self, form: FilterForm, focus: int) -> None:
+        axis = 0 if focus == 3 else 1
+        choices = form.observed.program_genres if axis == 0 else form.observed.personality_genres
+        current = form.field(focus).value
+        ids = [item.strip() for item in current.split(",") if item.strip()]
+        label_kind = "番組" if axis == 0 else "出演者"
+        labels = [f"{label_kind} {item.id}: {item.name}" for item in choices]
+        class_ids = [item.id for item in choices]
+        for class_id in ids:
+            if class_id not in class_ids:
+                labels.append(f"{label_kind} {class_id}: 今回未観測の保存済み指定")
+                class_ids.append(class_id)
+        form.picker = labels
+        form.picker_ids = class_ids
+        form.picker_selected = set(ids)
+        form.picker_unclassified = (
+            form.unclassified_program if axis == 0 else form.unclassified_personality
+        )
+        form.picker_index = 0
+        form.picker_field = focus
+
+    def _toggle_class(self, form: FilterForm, position: int) -> None:
+        if not (0 <= position < len(form.picker_ids or [])):
             return
-        current = getattr(form, target)
-        if key == "ctrl-u":
-            setattr(form, target, "")
-        elif key == "backspace":
-            setattr(form, target, current[:-1])
-        elif len(key) == 1 and key.isprintable():
-            setattr(form, target, current + key)
+        class_id = (form.picker_ids or [])[position]
+        if class_id in form.picker_selected:
+            form.picker_selected.discard(class_id)
+            form.error = ""
+            return
+        size = sum(len(item.encode()) + 1 for item in form.picker_selected)
+        if not class_id.strip() or len(class_id) > 128 or any(ord(c) < 32 for c in class_id):
+            form.error = "この候補の分類IDは不正なため選択できません"
+        elif size + len(class_id.encode()) > 4096:
+            form.error = "分類IDの合計は4096バイトまでです。選択を減らしてください"
+        else:
+            form.picker_selected.add(class_id)
+            form.error = ""
 
     def _framed(self, title: str, body: str) -> list[str]:
         lines = [truncate_width(f"┌ {title}", self.width)]
@@ -920,6 +1043,11 @@ class Screen:
         return True
 
     def _commit_search(self) -> None:
+        base = self.ensure_criteria()
+        try:
+            self.criteria = SearchCriteria.create(base.scope, base.range, self.committed)
+        except ValueError:
+            self.criteria = base
         self.generation += 1
         self.fetches += 1
         self.area = "list"
@@ -1089,6 +1217,9 @@ class Screen:
             f"{self.seconds_text}\nEnter 確定 / Esc 取消 / Ctrl+U 消去 / {self.seconds_error}"
         )
 
+    def _named_store(self) -> SearchStore:
+        return SearchStore(self.data_dir or default_data_dir())
+
     def _open_named(self) -> None:
         if self.offline:
             self._set_notice(
@@ -1096,13 +1227,15 @@ class Screen:
             )
             return
 
-        store = SearchStore(self.data_dir or default_data_dir())
         try:
-            library = store.load()
+            library = self._named_store().load()
         except Exception as error:
             self._set_notice(NoticeLevel.ERROR, f"保存条件の操作失敗: {error}", True)
             return
         self.named = dict(library.named)
+        self.named_index = min(self.named_index, max(len(self.named) - 1, 0))
+        self.named_mode = "browse"
+        self.draft_name = LineEditor("", 0, 256, 64)
         self.area = "named"
 
     def _on_air(self) -> None:
@@ -1130,25 +1263,30 @@ class Screen:
             self._set_notice(NoticeLevel.INFO, "局で絞るには番組を選択してください", sticky=False)
             return
         program = rows[min(self.selected, len(rows) - 1)]
-        self.committed = Filter.create(
-            self.committed.program_genres,
-            self.committed.personality_genres,
-            self.committed.unclassified_program,
-            self.committed.unclassified_personality,
-            self.committed.keyword,
-        )
-        self.area = "filter"
-        self.station_scope = program.key.station_id
+        self._open_filter()
+        if self.filter_form is not None:
+            self.filter_form.set_field(2, f"局:{program.key.station_id}")
 
-    def _seek(self, delta: int) -> None:
+    def _seek(self, delta: int) -> bool:
         if not self.playing:
-            return
+            return False
         total = (self.playing.ends_at - self.playing.key.starts_at).total_seconds()
         target = self.position + delta
         if target < 0 or target >= total:
             self._set_notice(NoticeLevel.WARNING, "シーク不可", sticky=True)
-            return
+            return False
         self.position = target
+        return True
+
+    def _command(self, line: str) -> None:
+        """バックグラウンドの play_station へ渡す。再生ジョブが無ければ音量表示だけ更新する。"""
+        box = self.play_commands
+        if box is None:
+            return
+        try:
+            box.put_nowait(line)
+        except queue.Full:
+            pass
 
     def _keyword(self, key: str) -> None:
         if key == "esc":
@@ -1178,31 +1316,120 @@ class Screen:
             self.draft_keyword.handle(key)
 
     def _named(self, key: str) -> None:
+        names = list(self.named)
+        if self.named_mode == "name":
+            if key == "esc":
+                self.named_mode = "browse"
+                return
+            if key == "enter":
+                self._save_named()
+                return
+            self.draft_name.handle(key)
+            return
+        if self.named_mode == "delete":
+            if key == "y":
+                self._delete_named()
+                return
+            if key in {"n", "q", "esc"}:
+                self.named_mode = "browse"
+            return
         if key in {"q", "esc"}:
             self.area = "list"
             return
-        if key == "enter":
-            name = self.draft_name.value
-            if name in self.named:
-                criteria = self.named[name]
-                self.criteria = criteria
-                self.committed = criteria.filter
-                if criteria.scope.kind == "station" and isinstance(criteria.scope.value, str):
-                    self.station_id = criteria.scope.value
-                self._set_notice(
-                    NoticeLevel.INFO,
-                    f"「{name}」を呼び出しました "
-                    f"{criteria.range.start.strftime('%Y%m%d')}"
-                    f"〜{criteria.range.end.strftime('%Y%m%d')}",
-                    sticky=False,
-                )
-            else:
-                self._set_notice(
-                    NoticeLevel.WARNING, f"「{name}」は保存されていません", sticky=True
-                )
-            self.area = "list"
+        if key == "r":
+            self._open_named()
             return
-        self.draft_name.handle(key)
+        if key == "n":
+            self.named_mode = "name"
+            self.draft_name = LineEditor("", 0, 256, 64)
+            return
+        if key in {"j", "down"}:
+            if names:
+                self.named_index = min(self.named_index + 1, len(names) - 1)
+            return
+        if key in {"k", "up"}:
+            self.named_index = max(self.named_index - 1, 0)
+            return
+        if key == "d":
+            if names:
+                self.named_target = names[min(self.named_index, len(names) - 1)]
+                self.named_mode = "delete"
+            return
+        if key == "enter":
+            if not names:
+                return
+            name = names[min(self.named_index, len(names) - 1)]
+            criteria = self.named[name]
+            self.criteria = criteria
+            self.committed = criteria.filter
+            if criteria.scope.kind == "station" and isinstance(criteria.scope.value, str):
+                self.station_id = criteria.scope.value
+            self._set_notice(
+                NoticeLevel.INFO,
+                f"「{name}」を呼び出しました "
+                f"{criteria.range.start.strftime('%Y%m%d')}"
+                f"〜{criteria.range.end.strftime('%Y%m%d')}"
+                "（検索はまだ行いません）",
+                sticky=False,
+            )
+            self._open_filter()
+
+    def _save_named(self) -> None:
+        name = self.draft_name.value
+        try:
+            store = self._named_store()
+            store.save_named(name, self.ensure_criteria())
+            self.named = dict(store.load().named)
+        except Exception as error:
+            self._set_notice(NoticeLevel.ERROR, f"保存条件の操作失敗: {error}", True)
+            self.named_mode = "browse"
+            return
+        names = list(self.named)
+        self.named_index = names.index(name) if name in names else 0
+        self.named_mode = "browse"
+        self._set_notice(NoticeLevel.INFO, f"「{name}」を保存しました", sticky=False)
+
+    def _delete_named(self) -> None:
+        name = self.named_target
+        try:
+            store = self._named_store()
+            store.delete_named(name)
+            self.named = dict(store.load().named)
+        except Exception as error:
+            self._set_notice(NoticeLevel.ERROR, f"保存条件の操作失敗: {error}", True)
+            self.named_mode = "browse"
+            return
+        names = list(self.named)
+        self.named_index = min(self.named_index, max(len(names) - 1, 0))
+        self.named_mode = "browse"
+        self._set_notice(NoticeLevel.INFO, f"「{name}」を削除しました", sticky=False)
+
+    def _named_body(self) -> str:
+        names = list(self.named)
+        if not names:
+            lines = ["保存済み条件はありません。nで確定済み条件を保存できます"]
+        else:
+            lines = [
+                f"{'>' if index == min(self.named_index, len(names) - 1) else ' '} {name}"
+                for index, name in enumerate(names)
+            ]
+            chosen = self.named[names[min(self.named_index, len(names) - 1)]]
+            lines.append(
+                f"{criteria_scope(chosen)} / {chosen.range.start}〜{chosen.range.end} / "
+                f"キーワード: {chosen.filter.keyword or '指定なし'}"
+            )
+        if self.named_mode == "name":
+            lines.append(f"名前: {self.draft_name.value}")
+            lines.append(
+                "Enter 保存（同名は更新） / ←→ Home End Delete Backspace Ctrl+U 編集 / Esc 取消"
+            )
+        elif self.named_mode == "delete":
+            lines.append(f"「{self.named_target}」を削除しますか（y 確定 / n 取消）")
+        else:
+            lines.append(
+                "Enter 条件を呼び出し（検索はまだ行いません） / n 保存 / d 削除 / r 再読込 / q 閉じる"
+            )
+        return "\n".join(lines)
 
     def _logout(self, key: str) -> None:
         if key == "y":
@@ -1418,16 +1645,28 @@ def _fetch_programs(criteria: SearchCriteria, cancel) -> dict:
     }
 
 
+def _pump(box) -> str | None:
+    if box is None:
+        return None
+    try:
+        return box.get_nowait()
+    except queue.Empty:
+        return None
+
+
 def _start_job(screen: Screen, kind: str, payload) -> None:
     previous = screen.job_cancel
     if previous is not None:
         previous.set()
+    screen.play_commands = None
     screen.job_generation += 1
     generation = screen.job_generation
     cancel = threading.Event()
     box: queue.Queue = queue.Queue(1)
     screen.job_cancel = cancel
     screen.job_box = box
+    commands_box: queue.Queue | None = queue.Queue() if kind == "play" else None
+    screen.play_commands = commands_box
 
     def work() -> None:
         try:
@@ -1457,6 +1696,7 @@ def _start_job(screen: Screen, kind: str, payload) -> None:
                     offset,
                     None,
                     cancel.is_set,
+                    commands=lambda: _pump(commands_box),
                 )
                 result = ("play", report)
             box.put((generation, result, None))
@@ -1479,6 +1719,7 @@ def poll_jobs(screen: Screen) -> None:
     if generation != screen.job_generation:
         return
     screen.job_box = None
+    screen.play_commands = None
     screen.revision += 1
     if error is not None:
         if getattr(error, "code", None) == "cancelled":
@@ -1526,6 +1767,31 @@ def wait_jobs(screen: Screen, timeout: float = 8.0) -> None:
     poll_jobs(screen)
 
 
+def startup_state(args: list[str], data_dir: Path | None, now: datetime, offline: bool):
+    """起動条件。明示引数 → 前回条件の復元 → 当日1日。保存先もここで決める。"""
+    store = None
+    notice = ""
+    if not offline:
+        try:
+            store = SearchStore(data_dir) if data_dir else SearchStore(default_data_dir())
+        except Exception as error:
+            notice = f"条件保存先の取得失敗: {error}"
+    if args:
+        from radiko_client.cli import build_criteria
+
+        return build_criteria(args, now), store, notice
+    if store is None:
+        return SearchCriteria.initial(now), store, notice
+    try:
+        library = store.load()
+        criteria = (
+            library.last.restore_startup(now) if library.last else SearchCriteria.initial(now)
+        )
+    except Exception as error:
+        return SearchCriteria.initial(now), store, f"条件復元失敗: {error}"
+    return criteria, store, notice
+
+
 def run(args: list[str], data_dir: Path | None) -> None:
     offline, rest = split_args(args)
     if rest == ["--help"]:
@@ -1540,16 +1806,14 @@ def run(args: list[str], data_dir: Path | None) -> None:
         parse_program_request(rest, now)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError("tuiは対話端末で実行してください")
-    positional = [arg for arg in rest if not arg.startswith("-")]
-    station = positional[0] if positional else "TBS"
-    screen = Screen([], now, offline=offline, data_dir=data_dir, station_id=station)
-    if positional:
-        day = parse_day(positional[1]) if len(positional) > 1 else broadcast_day(screen.now)
-        screen.criteria = SearchCriteria.create(
-            Scope.station(positional[0]),
-            BroadcastRange.single(day),
-            Filter.create(),
-        )
+    criteria, store, notice = startup_state(rest, data_dir, now, offline)
+    screen = Screen([], now, offline=offline, data_dir=data_dir)
+    screen.criteria = criteria
+    screen.committed = criteria.filter
+    if criteria.scope.kind == "station" and isinstance(criteria.scope.value, str):
+        screen.station_id = criteria.scope.value
+    if notice:
+        screen.notice = Notice(NoticeLevel.ERROR, notice, True, 0)
     if offline:
         day = broadcast_day(screen.now)
         try:
@@ -1557,7 +1821,18 @@ def run(args: list[str], data_dir: Path | None) -> None:
         except Exception:
             screen.programs = []
         screen.notice = Notice(NoticeLevel.INFO, OFFLINE_NOTICE, False, 0)
-    _terminal_loop(screen)
+    else:
+        # 起動直後のセッション確認と初期検索。どちらも service_loop の初回に流れる。
+        screen.auth_refresh = True
+        screen._commit_search()
+    try:
+        _terminal_loop(screen)
+    finally:
+        if store is not None:
+            try:
+                store.save_last(screen.ensure_criteria())
+            except Exception as error:
+                stderr_ln(f"条件保存失敗: {error}")
 
 
 def _terminal_loop(screen: Screen) -> None:

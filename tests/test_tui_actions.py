@@ -100,10 +100,15 @@ def test_named_search_is_loaded_from_the_saved_file(tmp_path):
     screen = Screen([], NOW, offline=False, data_dir=tmp_path)
     screen.handle("b")
     assert screen.area == "named"
-    for char in "生活":
-        screen.handle(char)
+    assert "生活" in "\n".join(screen.render())
+    screen.handle("enter")
+    assert screen.area == "filter"
+    assert screen.filter_form is not None
+    assert screen.filter_form.keyword.value == "生活"
+    assert screen.filter_form.scope.value == "局:TBS"
+    assert screen.fetch_programs is False
+    assert "「生活」を呼び出しました" in (screen.notice.text or "")
     screen.handle("enter")
     assert screen.area == "list"
     assert screen.committed.keyword == "生活"
-    assert screen.notice is not None
-    assert "「生活」を呼び出しました" in screen.notice.text
+    assert screen.fetch_programs is True
