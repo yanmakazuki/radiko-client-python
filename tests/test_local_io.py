@@ -304,7 +304,7 @@ def test_probe_silent_reuses_one_alsa_stream_for_all_chunks(monkeypatch):
         lambda: opened.append(True) or (FakeLibrary(), object()),
     )
     monkeypatch.setattr(output, "_close", lambda _opened: closed.append(True))
-    monkeypatch.setattr(output, "_write_pcm", lambda *_args: None)
+    monkeypatch.setattr(output, "_write_pcm", lambda *_args: (0, 0))
     summary = output.probe_silent(3, threading.Event())
     assert summary.frames == 3 * 48000
     assert len(opened) == 1

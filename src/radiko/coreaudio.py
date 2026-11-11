@@ -11,6 +11,7 @@ import ctypes.util
 import sys
 import threading
 import time
+import unicodedata
 
 import numpy as np
 
@@ -19,6 +20,11 @@ from radiko.output import OutputError, OutputInfo, OutputSummary
 LINEAR_PCM = 0x6C70636D
 FLOAT_PACKED = 1 | 8
 CF_STRING_ENCODING_UTF8 = 0x08000100
+# Rust の OUTPUT_CALLBACK_WAIT。これだけコールバックが進まなければ止まったとみなす。
+CALLBACK_WAIT_SECONDS = 3.0
+# バッファが溜まる一方で一度も完了しないときの上限。先行分0.25秒を足す。
+NO_CALLBACK_SECONDS = CALLBACK_WAIT_SECONDS + 0.25
+NAME_LIMIT = 256
 
 
 class StreamDescription(ctypes.Structure):
@@ -100,15 +106,21 @@ def library():
     return loaded
 
 
+def sanitize_device_name(text: str) -> str:
+    """Rust 同様、制御文字を落とし256文字で切る。"""
+    return "".join(char for char in text if unicodedata.category(char) != "Cc")[:NAME_LIMIT]
+
+
 def inspect(rate: int, opened=None) -> OutputInfo:
     device = _default_output()
     if device is None:
         raise OutputError("none")
-    name, nominal, formats = device
+    name, _nominal, formats = device
+    name = sanitize_device_name(name)
     channels = 2 if _supports(rate, 2, formats) else 1 if _supports(rate, 1, formats) else None
     if channels is not None:
         return OutputInfo(name, rate, "f32", channels, "")
-    mismatch = _mismatch(rate, nominal, formats)
+    mismatch = _mismatch(rate, formats)
     return OutputInfo(name, rate, None, None, mismatch)
 
 
@@ -127,6 +139,7 @@ class Stream:
 
         def completed(_user, queue, buffer) -> None:
             self.outstanding = max(0, self.outstanding - 1)
+            self.last_callback = time.monotonic()
             free = getattr(self.lib, "AudioQueueFreeBuffer", None)
             if free is not None and buffer:
                 free(queue, buffer)
@@ -140,6 +153,7 @@ class Stream:
         self.started_at = 0.0
         self.queued_frames = 0
         self.played_frames = 0
+        self.last_callback: float | None = None
         self.closed = False
 
     def write(self, samples, volume: int = 100) -> None:
@@ -183,10 +197,23 @@ class Stream:
                 self.step_hook(self.queued_frames)
             if self.stop.is_set():
                 return
+            self._check_stalled()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
             time.sleep(min(0.01, remaining))
+
+    def _check_stalled(self) -> None:
+        """コールバックが止まった出力を、先に待ち続ける代わりに止める。"""
+        if not self.started or self.stop.is_set():
+            return
+        if self.last_callback is None:
+            # 完了が一度も無ければ、溜まった分だけ待って判定する。
+            if self.queued_frames > NO_CALLBACK_SECONDS * self.rate:
+                raise OutputError("stalled")
+            return
+        if time.monotonic() - self.last_callback > CALLBACK_WAIT_SECONDS:
+            raise OutputError("stalled")
 
     def close(self) -> None:
         if self.closed:
@@ -220,7 +247,10 @@ def play(
         stream.write(samples)
         stream.close()
     except Exception:
-        stream.close()
+        try:
+            stream.close()
+        except OutputError:
+            pass  # 元のエラーを優先する。
         raise
     return OutputSummary(stream.played_frames, rate, stream.channels, "f32", 0)
 
@@ -411,20 +441,34 @@ def _stream_formats(
         if items:
             for item in items:
                 fmt = item.mFormat
-                if fmt.mFormatID == LINEAR_PCM and fmt.mFormatFlags & 1:
-                    if fmt.mChannelsPerFrame in {1, 2}:
-                        formats.append(
-                            (
-                                item.mSampleRateRange.mMinimum,
-                                item.mSampleRateRange.mMaximum,
-                                int(fmt.mChannelsPerFrame),
-                            )
+                label = _format_label(fmt)
+                if label is not None and fmt.mChannelsPerFrame in {1, 2}:
+                    formats.append(
+                        (
+                            item.mSampleRateRange.mMinimum,
+                            item.mSampleRateRange.mMaximum,
+                            int(fmt.mChannelsPerFrame),
+                            label,
                         )
+                    )
             continue
         if _float_physical_format(coreaudio, stream):
             for rate in nominal:
-                formats.extend([(rate, rate, 1), (rate, rate, 2)])
+                formats.extend([(rate, rate, 1, "f32"), (rate, rate, 2, "f32")])
     return formats
+
+
+def _format_label(fmt: StreamDescription) -> str | None:
+    """linear PCM のビットレイアウトから Rust と同じラベルを作る。"""
+    if fmt.mFormatID != LINEAR_PCM:
+        return None
+    bits = int(fmt.mBitsPerChannel)
+    flags = int(fmt.mFormatFlags)
+    if flags & 1:
+        return {32: "f32", 64: "f64"}.get(bits, "その他")
+    if flags & 2:
+        return {8: "i8", 16: "i16", 32: "i32", 64: "i64"}.get(bits, "その他")
+    return {8: "u8", 16: "u16", 32: "u32", 64: "u64"}.get(bits, "その他")
 
 
 def _float_physical_format(coreaudio, stream: int) -> bool:
@@ -439,26 +483,31 @@ def _float_physical_format(coreaudio, stream: int) -> bool:
 
 
 def _supports(rate: float, channels: int, formats) -> bool:
-    return any(
-        item_channels == channels and minimum <= rate <= maximum
-        for minimum, maximum, item_channels in formats
-    )
+    """再生に使えるのは f32 のみ。旧来の3要素タプルは f32 として扱う。"""
+    for item in formats:
+        if len(item) >= 4 and item[3] != "f32":
+            continue
+        if item[2] == channels and item[0] <= rate <= item[1]:
+            return True
+    return False
 
 
-def _mismatch(rate: int, nominal: list[float], formats) -> str:
-    supported = []
-    for candidate in nominal:
-        channels = (
-            2 if _supports(candidate, 2, formats) else 1 if _supports(candidate, 1, formats) else 0
-        )
-        if channels:
-            text = f"{candidate:g}Hz・f32・{channels}ch"
-            if text not in supported:
-                supported.append(text)
-    range_text = "、".join(supported) if supported else "なし"
-    return (
-        f"必要な形式は{rate}Hzのmonoまたはstereoのf32・i16・i32です。機器の対応範囲: {range_text}"
-    )
+def _mismatch(rate: int, formats) -> str:
+    """非対応時に、機器が宣言した全フォーマットを Rust と同じ形で列挙する。"""
+    entries: list[str] = []
+    for item in formats:
+        minimum, maximum, channels = item[0], item[1], item[2]
+        if channels not in {1, 2}:
+            continue
+        label = item[3] if len(item) >= 4 else "f32"
+        span = f"{minimum:g}Hz" if minimum == maximum else f"{minimum:g}〜{maximum:g}Hz"
+        text = f"{span}・{label}・{channels}ch"
+        if text not in entries:
+            entries.append(text)
+    ranges = "、".join(entries[:12]) if entries else "なし"
+    if len(entries) > 12:
+        ranges += "、ほか"
+    return f"必要な形式は{rate}Hzのmonoまたはstereoのf32・i16・i32です。機器の対応範囲: {ranges}"
 
 
 def _forget(callback) -> None:
