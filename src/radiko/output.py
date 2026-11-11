@@ -12,6 +12,7 @@ import ctypes.util
 import os
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -19,6 +20,11 @@ import numpy as np
 
 PCM_RATE_MIN = 8000
 PCM_RATE_MAX = 192000
+# ALSA の負の戻り値。バッファ枯渇と、ノンブロックの書き込み待ち。
+EPIPE = -32
+EAGAIN = -11
+# EAGAIN / 0件書き込みの打ち切り。1回1msで最大0.1秒。
+MAX_WRITE_RETRIES = 100
 
 
 class OutputError(Exception):
@@ -225,12 +231,16 @@ class _AlsaStream(OutputStream):
                 break
             step = min(self.quantum, frames - cursor)
             if self.paused.is_set():
-                _write_silence(self.opened, self.sample_format, self.channels, step)
+                _written, underruns = _write_silence(
+                    self.opened, self.sample_format, self.channels, step
+                )
+                self.underruns += underruns
                 continue
             block = array[cursor * self.input_channels : (cursor + step) * self.input_channels]
             if self.channels != self.input_channels:
                 block = _remix(block, self.input_channels, self.channels, step)
-            _write_pcm(self.opened, block, self.sample_format, self.channels)
+            _written, underruns = _write_pcm(self.opened, block, self.sample_format, self.channels)
+            self.underruns += underruns
             cursor += step
             self.frames += step
 
@@ -364,6 +374,10 @@ def _alsa():
     library.snd_pcm_set_params.restype = ctypes.c_int
     library.snd_pcm_writei.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
     library.snd_pcm_writei.restype = ctypes.c_long
+    library.snd_pcm_recover.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    library.snd_pcm_recover.restype = ctypes.c_int
+    library.snd_pcm_prepare.argtypes = [ctypes.c_void_p]
+    library.snd_pcm_prepare.restype = ctypes.c_int
     return library
 
 
@@ -398,7 +412,8 @@ def _select_format(opened, rate: int):
     return None
 
 
-def _write_pcm(opened, samples, sample_format: str, channels: int) -> None:
+def _write_pcm(opened, samples, sample_format: str, channels: int) -> tuple[int, int]:
+    """全部書き切るまでループする。（書き込んだフレーム, アンダーランフレーム)を返す。"""
     library, handle = opened
     array = np.asarray(samples, dtype=np.float32).reshape(-1)
     if sample_format == "f32":
@@ -408,13 +423,57 @@ def _write_pcm(opened, samples, sample_format: str, channels: int) -> None:
     else:
         payload = np.clip(array * 2147483647, -2147483648, 2147483647).astype(np.int32)
     frames = array.size // channels
-    written = library.snd_pcm_writei(handle, payload.ctypes.data_as(ctypes.c_void_p), frames)
-    if written < 0:
-        raise OutputError("device")
+    item_size = payload.itemsize * channels
+    base = payload.ctypes.data_as(ctypes.c_void_p)
+    cursor = 0
+    underruns = 0
+    retries = 0
+    while cursor < frames:
+        pointer = ctypes.c_void_p(base.value + cursor * item_size)
+        written = library.snd_pcm_writei(handle, pointer, frames - cursor)
+        if written == 0:
+            retries += 1
+            if retries > MAX_WRITE_RETRIES:
+                raise OutputError("device")
+            time.sleep(0.001)
+            continue
+        if written < 0:
+            code = int(written)
+            if code == EPIPE:
+                # バッファ枯渇。回復し、その時点で書き切れなかった分を不足として数える。
+                underruns += frames - cursor
+                _recover(library, handle, code)
+                retries += 1
+                if retries > MAX_WRITE_RETRIES:
+                    raise OutputError("device")
+                continue
+            if code == EAGAIN:
+                retries += 1
+                if retries > MAX_WRITE_RETRIES:
+                    raise OutputError("device")
+                time.sleep(0.001)
+                continue
+            raise OutputError("device")
+        retries = 0
+        cursor += int(written)
+    return frames, underruns
 
 
-def _write_silence(opened, sample_format: str, channels: int, frames: int) -> None:
-    _write_pcm(opened, np.zeros(frames * channels, dtype=np.float32), sample_format, channels)
+def _recover(library, handle, code: int) -> None:
+    """XRUN の回復。snd_pcm_recover が無ければ snd_pcm_prepare で立て直す。"""
+    recover = getattr(library, "snd_pcm_recover", None)
+    with _silence_alsa(library):
+        if recover is not None and recover(handle, code, 1) >= 0:
+            return
+        prepare = getattr(library, "snd_pcm_prepare", None)
+        if prepare is None or prepare(handle) < 0:
+            raise OutputError("device")
+
+
+def _write_silence(opened, sample_format: str, channels: int, frames: int) -> tuple[int, int]:
+    return _write_pcm(
+        opened, np.zeros(frames * channels, dtype=np.float32), sample_format, channels
+    )
 
 
 _ALSA_ERROR = ctypes.CFUNCTYPE(

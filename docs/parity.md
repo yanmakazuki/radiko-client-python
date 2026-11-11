@@ -42,7 +42,7 @@
 | `inspect-chapters` | 対応 | fixture の行 |
 | `programs` の引数 | 対応 | 不正な局・日付・30日超・分類は通信前に失敗 |
 | `programs` の取得 | 部分 | `RADIKO_CATALOG_ORIGIN` が `http://127.0.0.1` のときだけ。fixture サーバで JSON と本文を確認。既定の `https://radiko.jp` はテストしていない |
-| `output-info` / `probe-output` | 部分 | 引数範囲は一致。機器が無い Linux は「既定の音声出力機器がありません」。`RADIKO_NULL_SINK=1` は壁時計では待たない単体出力 |
+| `output-info` / `probe-output` | 部分 | 引数範囲は一致。機器が無い Linux は「既定の音声出力機器がありません」。非対応時は機器が宣言した全フォーマットを最大12件と「、ほか」で列挙する。`RADIKO_NULL_SINK=1` は壁時計では待たない単体出力 |
 | `probe-live` / `probe-timefree` / `play-sample` / `play-live` / `play-timefree` / `chapters` | 部分 | 本番 URL を組み立て、`RADIKO_LOOPBACK_ORIGIN` のときだけ同じパスを `127.0.0.1` へ載せる。会員確認、auth1/auth2、番組 JSON、局一覧、配信先 XML、HLS、ADTS、取り消しをこの経路で確認した。変数が無いときは本番ホストへ出る。実 radiko の成功再生は未試験 |
 | `--interactive` | 部分 | 疑似端末で status、seek、未知の行、q を確認した。番組時刻があるセグメントは、目標より前をフレーム単位で切り捨てる。窓より前・後へのシークは `seek=` を付けて準備し直す。時刻が無いシークはプレイリストエラー。非 TTY では入力を読まない |
 | 終了コード 141 | 対応 | 読み手を閉じたパイプで `--help` を起動し、終了コード 141、標準エラーにエラー行が無いことを見た。終了時の flush は `/dev/null` に付け替え、Python が 120 に変えない |
@@ -65,7 +65,7 @@
 ## 意図した実行環境の差
 
 - AAC は `rusty_aac` ではなく PyAV 14.2.0 の libavcodec。拒否する ADTS と、HE-AAC 宣言なのに SBR が無いときの失敗は合わせた。サンプル値は合わせない。
-- 出力の優先は f32、i32、i16。レート変換はしない。Linux は libasound の `default`。macOS は AudioToolbox の AudioQueue。コールバックは Stop まで保持し Dispose で手放すことまで、偽のライブラリで見た。実機の再生は未検証。
+- 出力の優先は f32、i32、i16。レート変換はしない。Linux は libasound の `default`。macOS は AudioToolbox の AudioQueue。コールバックは Stop まで保持し Dispose で手放すことまで、偽のライブラリで見た。書き込みは1秒以内のバッファに分け、未完了バッファがあるまま完了通知が3秒（一度も完了が無ければ活動開始から3.25秒）止まれば `stalled`。停止中のアイドルは数えない。デバイス名は制御文字を落とし256文字で切る（読み取りバッファは UTF-8 で1025バイト）。非対応時は f32 以外や3ch以上も含めて列挙する。ALSA は部分書き込みを最後まで続け、`-EPIPE` は `snd_pcm_recover`（無ければ `snd_pcm_prepare`）で立て直し、書き切れなかったフレームをバッファ不足として数える。実機の再生は未検証。
 - `RADIKO_NULL_SINK=1` は PulseAudio の null sink ではなく、フレーム数だけ進むプロセス内出力。壁時計では待たない。
 - `RADIKO_ALSA_LOG=1` のときだけ ALSA の診断を残す。
 - `RADIKO_CATALOG_ORIGIN` と `RADIKO_AUTH_ORIGIN` は `http://127.0.0.1:ポート` だけを許す。Rust のデバッグビルドにある抜け道に相当し、リリースバイナリとの差として残す。
