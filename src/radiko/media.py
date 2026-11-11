@@ -343,24 +343,3 @@ def _walk(data, depth: int, boxes: int, samples: int) -> tuple[int, int]:
                         raise AacError("many")
         pos += size
     return boxes, samples
-
-
-def encode_adts_sine(packets: int = 2, rate: int = 44100) -> bytes:
-    """試験用の AAC-LC ADTS。実配信のバイト列ではない。"""
-    output = io.BytesIO()
-    container = av.open(output, mode="w", format="adts")
-    stream = container.add_stream("aac", rate=rate)
-    stream.layout = "mono"
-    positions = np.arange(packets * 1024, dtype=np.float64)
-    values = (0.2 * np.sin(2 * np.pi * 440 * positions / rate)).astype(np.float32)
-    for index in range(packets):
-        block = np.ascontiguousarray(values[index * 1024 : (index + 1) * 1024].reshape(1, 1024))
-        frame = av.AudioFrame.from_ndarray(block, format="fltp", layout="mono")
-        frame.sample_rate = rate
-        frame.pts = index * 1024
-        for packet in stream.encode(frame):
-            container.mux(packet)
-    for packet in stream.encode(None):
-        container.mux(packet)
-    container.close()
-    return output.getvalue()

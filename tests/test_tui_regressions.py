@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from radiko.domain import JST, BroadcastRange, Filter, Scope, SearchCriteria, broadcast_day
-from radiko.media import encode_adts_sine
+from radiko.fixtures import encode_adts_sine
 from radiko.storage import MemberSession, SearchStore, SessionStore
 
 UTC = timezone.utc

@@ -14,9 +14,11 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 
 import numpy as np
+
+from radiko import coreaudio
+from radiko.audio import OutputCapability, OutputError, OutputInfo, OutputSummary
 
 PCM_RATE_MIN = 8000
 PCM_RATE_MAX = 192000
@@ -25,53 +27,6 @@ EPIPE = -32
 EAGAIN = -11
 # EAGAIN / 0件書き込みの打ち切り。1回1msで最大0.1秒。
 MAX_WRITE_RETRIES = 100
-
-
-class OutputError(Exception):
-    def __init__(self, code: str, message: str | None = None) -> None:
-        self.code = code
-        self.message = message
-        super().__init__(message or _default(code))
-
-    def __str__(self) -> str:
-        return self.message or _default(self.code)
-
-
-def _default(code: str) -> str:
-    if code == "none":
-        return "既定の音声出力機器がありません"
-    if code == "stalled":
-        return "出力が停止しました"
-    if code == "device":
-        return "出力機器を確認してください"
-    return "出力機器を確認してください"
-
-
-@dataclass
-class OutputInfo:
-    name: str
-    sample_rate: int
-    sample_format: str | None
-    channels: int | None
-    mismatch: str
-
-
-@dataclass
-class OutputCapability:
-    host: str
-    name: str
-    sample_rate: int
-    f32_mono: bool
-    f32_stereo: bool
-
-
-@dataclass
-class OutputSummary:
-    frames: int
-    sample_rate: int
-    channels: int
-    sample_format: str
-    underrun_frames: int
 
 
 def null_sink_enabled() -> bool:
@@ -98,9 +53,7 @@ def diagnose_default_output(rate: int) -> OutputCapability:
     if null_sink_enabled():
         return OutputCapability("null", "null", rate, True, True)
     if host_backend() == "coreaudio":
-        from radiko.coreaudio import inspect as inspect_coreaudio
-
-        info = inspect_coreaudio(rate)
+        info = coreaudio.inspect(rate)
         return OutputCapability(
             "CoreAudio",
             info.name,
@@ -134,9 +87,7 @@ def inspect_default_output(rate: int) -> OutputInfo:
     if null_sink_enabled():
         return OutputInfo("null", rate, "f32", 2, "")
     if host_backend() == "coreaudio":
-        from radiko.coreaudio import inspect as inspect_coreaudio
-
-        return inspect_coreaudio(rate)
+        return coreaudio.inspect(rate)
     opened = _open_default()
     if opened is None:
         raise OutputError("none")
@@ -252,13 +203,10 @@ class _AlsaStream(OutputStream):
 
 class _CoreAudioStream(OutputStream):
     def __init__(self, rate, channels, stop, step_hook) -> None:
-        from radiko.coreaudio import Stream
-        from radiko.coreaudio import inspect as inspect_coreaudio
-
-        info = inspect_coreaudio(rate)
+        info = coreaudio.inspect(rate)
         if info.sample_format is None or info.channels is None:
             raise OutputError("device", info.mismatch)
-        self.stream = Stream(rate, info.channels, stop, step_hook)
+        self.stream = coreaudio.Stream(rate, info.channels, stop, step_hook)
         super().__init__(rate, channels, "f32", info.channels)
 
     def write(self, samples, volume: int = 100) -> None:

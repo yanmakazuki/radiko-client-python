@@ -15,7 +15,7 @@ import unicodedata
 
 import numpy as np
 
-from radiko.output import OutputError, OutputInfo, OutputSummary
+from radiko.audio import OutputError, OutputInfo, OutputSummary
 
 LINEAR_PCM = 0x6C70636D
 FLOAT_PACKED = 1 | 8

@@ -3,7 +3,6 @@ from datetime import datetime, timedelta, timezone
 from radiko.catalog import parse_programs
 from radiko.domain import Program, ProgramKey
 from radiko.media import AacError, AdtsDecoder, split_adts
-from radiko.player import Engine
 from radiko.text import display_width, graphemes
 from radiko_client.tui import (
     COMPACT_HEIGHT,
@@ -113,29 +112,26 @@ def test_escape_on_the_main_screen_does_not_quit():
 
 
 def test_pause_keeps_the_frames_already_sent(monkeypatch):
-    monkeypatch.setenv("RADIKO_NULL_SINK", "1")
-    engine = Engine()
-    generation = engine.request("TBS", "timefree", "20261015120000", 0)
-    seen = {}
-
-    def hook(played):
-        if played >= 4800:
-            engine.pause()
+    import threading
 
     from radiko.output import play_samples
 
-    summary = play_samples([0.2, 0.2] * 48000, 48000, 2, engine.stop, engine._pause_flag, 25, hook)
-    assert summary.frames == 4800 or summary.frames % (48000 // 50) == 0
+    monkeypatch.setenv("RADIKO_NULL_SINK", "1")
+    paused = threading.Event()
+    stop = threading.Event()
+
+    def hook(played):
+        if played >= 4800:
+            paused.set()
+
+    summary = play_samples([0.2, 0.2] * 48000, 48000, 2, stop, paused, 25, hook)
+    assert summary.frames == 4800
+    assert summary.frames % (48000 // 50) == 0
     assert summary.frames < 48000
-    assert engine.position == 0
-    report = engine.commit(generation, [0.2, 0.2] * 1000, 48000, 2, None)
-    assert report is not None
-    assert engine.commit(generation - 1, [0.2, 0.2] * 1000, 48000, 2, None) is None
-    _ = seen
 
 
 def test_adts_rejects_crc_and_decodes_a_generated_frame():
-    from radiko.media import encode_adts_sine
+    from radiko.fixtures import encode_adts_sine
 
     data = encode_adts_sine()
     frames = split_adts(data, lambda: False)

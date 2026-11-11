@@ -316,7 +316,8 @@ def test_decode_returns_float32_numpy_and_matches_list_playback(monkeypatch):
 
     import numpy as np
 
-    from radiko.media import AdtsDecoder, encode_adts_sine
+    from radiko.fixtures import encode_adts_sine
+    from radiko.media import AdtsDecoder
     from radiko.output import play_samples
 
     pcm = AdtsDecoder().decode_segment_pcm(encode_adts_sine(packets=2), None, lambda: False)

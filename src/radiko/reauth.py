@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 
-from radiko.prepare import authenticate_stream
 from radiko.storage import MemberSession
 from radiko.stream import ProbeError
 
@@ -16,9 +15,10 @@ REAUTH_INTERVAL = 20.0
 
 
 class ReauthState:
-    def __init__(self, session: MemberSession, cancelled, now=None):
+    def __init__(self, session: MemberSession, cancelled, refresh, now=None):
         self.session = session
         self.cancelled = cancelled
+        self.refresh = refresh
         self.now = now or time.monotonic
         self.last: float | None = None
         self.count = 0
@@ -33,7 +33,7 @@ class ReauthState:
         self.episode = True
         self.last = self.now()
         try:
-            refreshed, _area = authenticate_stream(self.session, self.cancelled)
+            refreshed, _area = self.refresh(self.session, self.cancelled)
         except ProbeError as error:
             if error.code == "cancelled":
                 raise ProbeError("cancelled").at(stage) from error
