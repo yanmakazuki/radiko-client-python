@@ -85,19 +85,28 @@ class _Frame:
     payload: bytes
 
 
+def id3_offset(data: bytes) -> int | None:
+    """連続する ID3v2 タグを飛ばした音声先頭。不正なタグは None。"""
+    offset = 0
+    for _ in range(8):
+        if data[offset : offset + 3] != b"ID3":
+            return offset if offset <= len(data) else None
+        tag = data[offset : offset + 10]
+        if len(tag) != 10 or not 2 <= tag[3] <= 4 or any(byte & 0x80 for byte in tag[6:10]):
+            return None
+        size = (tag[6] << 21) | (tag[7] << 14) | (tag[8] << 7) | tag[9]
+        footer = 10 if tag[3] == 4 and tag[5] & 0x10 else 0
+        offset += 10 + size + footer
+        if offset > len(data):
+            return None
+    return None
+
+
 def audio_offset(data: bytes) -> int:
-    if data.startswith(b"ID3"):
-        if len(data) < 10:
-            raise AacError("metadata")
-        size = _synchsafe(data[6:10])
-        return 10 + size
-    return 0
-
-
-def _synchsafe(raw: bytes) -> int:
-    if any(byte & 0x80 for byte in raw):
+    offset = id3_offset(data)
+    if offset is None:
         raise AacError("metadata")
-    return (raw[0] << 21) | (raw[1] << 14) | (raw[2] << 7) | raw[3]
+    return offset
 
 
 def split_adts(data: bytes, cancelled) -> list[_Frame]:

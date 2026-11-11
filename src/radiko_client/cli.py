@@ -1066,7 +1066,7 @@ def _print_probe(report) -> None:
     stdout_ln(
         f"HLS宣言コーデック: {codec} / サンプル形式: {report.container} / {report.sample_bytes}バイト"
     )
-    if report.decode_error and report.packets == 0:
+    if report.decode_error:
         if report.decode_error.startswith("HE-AAC"):
             stdout_ln(report.decode_error)
         else:
