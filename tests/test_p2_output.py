@@ -64,6 +64,9 @@ class _FrozenQueue:
         self.callback = None
         self.enqueued = 0
         self.fire_once = fire_once
+        # 偽のバッファは Python 側で生かしておく（C 側はアドレスしか持たない）。
+        self.buffers: list[coreaudio.QueueBuffer] = []
+        self.storages: list[ctypes.Array] = []
 
     def AudioQueueNewOutput(self, fmt, callback, user, loop, mode, flags, out):
         self.callback = callback
@@ -75,7 +78,8 @@ class _FrozenQueue:
         holder = coreaudio.QueueBuffer()
         holder.mAudioData = ctypes.cast(storage, ctypes.c_void_p)
         holder.mAudioDataBytesCapacity = len(storage)
-        holder.mUserData = ctypes.cast(storage, ctypes.c_void_p)
+        self.buffers.append(holder)
+        self.storages.append(storage)
         ctypes.cast(out, ctypes.POINTER(ctypes.POINTER(coreaudio.QueueBuffer)))[0] = ctypes.pointer(
             holder
         )
@@ -117,17 +121,18 @@ def test_frozen_audioqueue_callbacks_raise_stalled(monkeypatch):
     with pytest.raises(OutputError) as raised:
         stream.write(np.zeros(48000 * 2 * 5, dtype=np.float32))
     assert raised.value.code == "stalled"
-    with pytest.raises(OutputError) as closed:
-        stream.close()
-    assert closed.value.code == "stalled"
+    # 後片付けでは例外を重ねず、完了した分だけを再生済みとして残す。
+    stream.close()
+    assert stream.played_frames == 48000
+    assert stream.played_frames < stream.queued_frames
 
 
-def test_never_completed_buffers_stall_after_the_buffered_budget(monkeypatch):
+def test_never_completed_buffers_stall_after_the_grace_period(monkeypatch):
     backend = _FrozenQueue(fire_once=False)
     monkeypatch.setattr("radiko.coreaudio.library", lambda: backend)
     monkeypatch.setattr("radiko.coreaudio.time", _Clock)
     stream = coreaudio.Stream(48000, 2, threading.Event())
-    # 完了が一度も無いまま 3.25 秒ぶん（先行分0.25秒を含む）を溜めたら止まったとみなす。
+    # 完了が一度も無いまま 3.25 秒（先行分0.25秒を含む）たったら止まったとみなす。
     stream.write(np.zeros(48000 * 2 * 3, dtype=np.float32))
     with pytest.raises(OutputError) as raised:
         stream.write(np.zeros(48000 * 2, dtype=np.float32))
@@ -215,3 +220,137 @@ def test_write_pcm_without_a_recover_symbol_falls_back_to_prepare():
     assert written == 64
     assert underruns == 64
     assert library.prepared == 1
+
+
+class _HealthyQueue(_FrozenQueue):
+    """毎回の enqueue で完了を返す、正常な AudioQueue の偽装。"""
+
+    def AudioQueueEnqueueBuffer(self, queue, buffer, count, descriptions):
+        self.enqueued += 1
+        self.callback(None, queue, buffer)
+        return 0
+
+
+def test_long_write_is_split_so_completions_keep_it_alive(monkeypatch):
+    backend = _HealthyQueue()
+    monkeypatch.setattr("radiko.coreaudio.library", lambda: backend)
+    monkeypatch.setattr("radiko.coreaudio.time", _Clock)
+    stream = coreaudio.Stream(48000, 2, threading.Event())
+    stream.write(np.zeros(48000 * 2 * 5, dtype=np.float32))
+    assert backend.enqueued == 5  # 1秒ずつなら完了通知が3秒以上空かない
+    stream.close()
+    assert stream.played_frames == 48000 * 5
+
+
+def test_idle_gap_between_writes_is_not_a_stall(monkeypatch):
+    backend = _FrozenQueue()
+    monkeypatch.setattr("radiko.coreaudio.library", lambda: backend)
+    monkeypatch.setattr("radiko.coreaudio.time", _Clock)
+    stream = coreaudio.Stream(48000, 2, threading.Event())
+    stream.write(np.zeros(48000 * 2, dtype=np.float32))
+    _Clock.now += 5.0  # 一時停止して何も書かない
+    stream.write(np.zeros(48000 * 2, dtype=np.float32))
+    assert backend.enqueued == 2
+    stream.close()
+
+
+def test_format_label_uses_the_signed_integer_flag():
+    from radiko.coreaudio import LINEAR_PCM, StreamDescription, _format_label
+
+    def label(flags: int, bits: int) -> str | None:
+        fmt = StreamDescription()
+        fmt.mFormatID = LINEAR_PCM
+        fmt.mFormatFlags = flags
+        fmt.mBitsPerChannel = bits
+        return _format_label(fmt)
+
+    assert label(0x0C, 16) == "i16"  # signed + packed
+    assert label(0x0C, 32) == "i32"
+    assert label(0x08, 16) == "u16"  # packed だけなら unsigned
+    assert label(1, 32) == "f32"
+    assert label(2, 16) == "u16"  # big-endian は signed ではない
+
+
+def test_mismatch_keeps_multichannel_offers(monkeypatch):
+    monkeypatch.setattr(
+        coreaudio, "_default_output", lambda: ("Dev", [48000.0], [(48000.0, 48000.0, 6)])
+    )
+    info = coreaudio.inspect(44100)
+    assert info.channels is None
+    assert "48000Hz・f32・6ch" in info.mismatch
+    assert coreaudio._supports(48000.0, 2, [(48000.0, 48000.0, 6)]) is False
+
+
+def test_stream_formats_keeps_multichannel_declarations():
+    from radiko.coreaudio import (
+        DEVICE_STREAMS,
+        LINEAR_PCM,
+        STREAM_AVAILABLE_FORMATS,
+        AudioStreamRangedDescription,
+        StreamDescription,
+    )
+
+    description = StreamDescription()
+    description.mFormatID = LINEAR_PCM
+    description.mFormatFlags = 1
+    description.mChannelsPerFrame = 6
+    description.mBitsPerChannel = 32
+    item = AudioStreamRangedDescription()
+    item.mFormat = description
+    item.mSampleRateRange.mMinimum = 48000.0
+    item.mSampleRateRange.mMaximum = 48000.0
+
+    class _CoreAudio:
+        def AudioObjectGetPropertyDataSize(self, obj, address, qualifier, data, size):
+            selector = address._obj.mSelector
+            if selector == DEVICE_STREAMS:
+                amount = ctypes.sizeof(ctypes.c_uint32)
+            elif selector == STREAM_AVAILABLE_FORMATS:
+                amount = ctypes.sizeof(item)
+            else:
+                return -1
+            ctypes.cast(size, ctypes.POINTER(ctypes.c_uint32))[0] = amount
+            return 0
+
+        def AudioObjectGetPropertyData(self, obj, address, qualifier, data, used, out):
+            selector = address._obj.mSelector
+            if selector == DEVICE_STREAMS:
+                ctypes.cast(out, ctypes.POINTER(ctypes.c_uint32))[0] = 7
+            elif selector == STREAM_AVAILABLE_FORMATS:
+                ctypes.memmove(out, ctypes.byref(item), ctypes.sizeof(item))
+            else:
+                return -1
+            return 0
+
+    formats = coreaudio._stream_formats(_CoreAudio(), 5, [48000.0])
+    assert (48000.0, 48000.0, 6, "f32") in formats
+
+
+def test_device_name_buffer_holds_256_multibyte_characters():
+    long_name = "あ" * 300
+    encoded = long_name.encode("utf-8")
+    seen = {}
+
+    class _CoreAudio:
+        def AudioObjectGetPropertyDataSize(self, device, address, qualifier, data, size):
+            ctypes.cast(size, ctypes.POINTER(ctypes.c_uint32))[0] = ctypes.sizeof(ctypes.c_void_p)
+            return 0
+
+        def AudioObjectGetPropertyData(self, device, address, qualifier, data, used, out):
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(11)
+            return 0
+
+    class _CoreFoundation:
+        def CFStringGetCString(self, pointer, buffer, size, encoding):
+            seen["size"] = size
+            if len(encoded) + 1 > size:
+                return False
+            ctypes.memmove(buffer, encoded + b"\x00", len(encoded) + 1)
+            return True
+
+        def CFRelease(self, pointer):
+            return None
+
+    name = coreaudio._device_name(_CoreAudio(), _CoreFoundation(), 5)
+    assert seen["size"] >= 256 * 4 + 1
+    assert name == long_name

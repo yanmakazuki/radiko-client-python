@@ -65,7 +65,7 @@
 ## 意図した実行環境の差
 
 - AAC は `rusty_aac` ではなく PyAV 14.2.0 の libavcodec。拒否する ADTS と、HE-AAC 宣言なのに SBR が無いときの失敗は合わせた。サンプル値は合わせない。
-- 出力の優先は f32、i32、i16。レート変換はしない。Linux は libasound の `default`。macOS は AudioToolbox の AudioQueue。コールバックは Stop まで保持し Dispose で手放すことまで、偽のライブラリで見た。デバイス名は制御文字を落とし256文字で切り、コールバックが3秒（完了が一度も無い場合は3.25秒ぶんのバッファ）止まれば `stalled`。ALSA は部分書き込みを最後まで続け、`-EPIPE` は `snd_pcm_recover`（無ければ `snd_pcm_prepare`）で立て直し、書き切れなかったフレームをバッファ不足として数える。実機の再生は未検証。
+- 出力の優先は f32、i32、i16。レート変換はしない。Linux は libasound の `default`。macOS は AudioToolbox の AudioQueue。コールバックは Stop まで保持し Dispose で手放すことまで、偽のライブラリで見た。書き込みは1秒以内のバッファに分け、未完了バッファがあるまま完了通知が3秒（一度も完了が無ければ活動開始から3.25秒）止まれば `stalled`。停止中のアイドルは数えない。デバイス名は制御文字を落とし256文字で切る（読み取りバッファは UTF-8 で1025バイト）。非対応時は f32 以外や3ch以上も含めて列挙する。ALSA は部分書き込みを最後まで続け、`-EPIPE` は `snd_pcm_recover`（無ければ `snd_pcm_prepare`）で立て直し、書き切れなかったフレームをバッファ不足として数える。実機の再生は未検証。
 - `RADIKO_NULL_SINK=1` は PulseAudio の null sink ではなく、フレーム数だけ進むプロセス内出力。壁時計では待たない。
 - `RADIKO_ALSA_LOG=1` のときだけ ALSA の診断を残す。
 - `RADIKO_CATALOG_ORIGIN` と `RADIKO_AUTH_ORIGIN` は `http://127.0.0.1:ポート` だけを許す。Rust のデバッグビルドにある抜け道に相当し、リリースバイナリとの差として残す。

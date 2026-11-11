@@ -140,6 +140,12 @@ class Stream:
         def completed(_user, queue, buffer) -> None:
             self.outstanding = max(0, self.outstanding - 1)
             self.last_callback = time.monotonic()
+            frames = 0
+            if buffer:
+                # CFUNCTYPE は void* を int で渡す。バッファの mUserData に積んだフレーム数を読む。
+                holder = ctypes.cast(buffer, ctypes.POINTER(QueueBuffer)).contents
+                frames = int(holder.mUserData or 0)
+            self.completed_frames += frames
             free = getattr(self.lib, "AudioQueueFreeBuffer", None)
             if free is not None and buffer:
                 free(queue, buffer)
@@ -153,7 +159,10 @@ class Stream:
         self.started_at = 0.0
         self.queued_frames = 0
         self.played_frames = 0
+        self.completed_frames = 0
         self.last_callback: float | None = None
+        # 未完了バッファが 0→1 になった時刻。休止あけの猶予をここから数える。
+        self.queue_active_at = 0.0
         self.closed = False
 
     def write(self, samples, volume: int = 100) -> None:
@@ -167,7 +176,27 @@ class Stream:
         if frames <= 0:
             return
         payload = np.ascontiguousarray(array, dtype=np.float32)
-        size = payload.nbytes
+        # 1秒以内に区切る。1本の長いバッファだと完了通知が来ず、停滞と区別できない。
+        chunk = max(int(self.rate), 1)
+        cursor = 0
+        while cursor < frames:
+            if self.stop.is_set():
+                return
+            step = min(chunk, frames - cursor)
+            piece = payload[cursor * self.channels : (cursor + step) * self.channels]
+            self._enqueue(piece, step)
+            cursor += step
+            if not self.started:
+                status = self.lib.AudioQueueStart(self.queue, None)
+                if status != 0:
+                    raise OutputError("device")
+                self.started = True
+                self.started_at = time.monotonic()
+            self.queued_frames += step
+            self._wait(self.started_at + self.queued_frames / self.rate - 0.25)
+
+    def _enqueue(self, piece, frames: int) -> None:
+        size = piece.nbytes
         buffer_ref = ctypes.POINTER(QueueBuffer)()
         status = self.lib.AudioQueueAllocateBuffer(
             self.queue, max(size, 4), ctypes.byref(buffer_ref)
@@ -175,21 +204,17 @@ class Stream:
         if status != 0 or not buffer_ref:
             raise OutputError("device")
         destination = ctypes.cast(buffer_ref.contents.mAudioData, ctypes.POINTER(ctypes.c_char))
-        ctypes.memmove(destination, payload.ctypes.data, size)
+        ctypes.memmove(destination, piece.ctypes.data, size)
         buffer_ref.contents.mAudioDataByteSize = size
+        # 完了コールバックはこの値で再生済みフレームを数える。
+        buffer_ref.contents.mUserData = frames
+        if self.outstanding == 0:
+            self.queue_active_at = time.monotonic()
         self.outstanding += 1
         status = self.lib.AudioQueueEnqueueBuffer(self.queue, buffer_ref, 0, None)
         if status != 0:
             self.outstanding -= 1
             raise OutputError("device")
-        if not self.started:
-            status = self.lib.AudioQueueStart(self.queue, None)
-            if status != 0:
-                raise OutputError("device")
-            self.started = True
-            self.started_at = time.monotonic()
-        self.queued_frames += frames
-        self._wait(self.started_at + self.queued_frames / self.rate - 0.25)
 
     def _wait(self, deadline: float) -> None:
         while True:
@@ -204,15 +229,12 @@ class Stream:
             time.sleep(min(0.01, remaining))
 
     def _check_stalled(self) -> None:
-        """コールバックが止まった出力を、先に待ち続ける代わりに止める。"""
-        if not self.started or self.stop.is_set():
+        """未完了バッファがあるのに進まないときだけ止まったとみなす。"""
+        if not self.started or self.stop.is_set() or self.outstanding <= 0:
             return
-        if self.last_callback is None:
-            # 完了が一度も無ければ、溜まった分だけ待って判定する。
-            if self.queued_frames > NO_CALLBACK_SECONDS * self.rate:
-                raise OutputError("stalled")
-            return
-        if time.monotonic() - self.last_callback > CALLBACK_WAIT_SECONDS:
+        anchor = max(self.last_callback or 0.0, self.queue_active_at)
+        limit = CALLBACK_WAIT_SECONDS if self.last_callback is not None else NO_CALLBACK_SECONDS
+        if time.monotonic() - anchor > limit:
             raise OutputError("stalled")
 
     def close(self) -> None:
@@ -222,13 +244,17 @@ class Stream:
         try:
             if self.started:
                 if not self.stop.is_set():
-                    self._wait(self.started_at + self.queued_frames / self.rate)
+                    try:
+                        self._wait(self.started_at + self.queued_frames / self.rate)
+                    except OutputError:
+                        pass  # 停止・停滞で閉じる。呼び出し元のエラーを優先する。
                 elapsed = time.monotonic() - self.started_at
-                self.played_frames = (
-                    self.queued_frames
-                    if not self.stop.is_set()
-                    else min(self.queued_frames, max(0, int(elapsed * self.rate)))
-                )
+                if self.stop.is_set():
+                    self.played_frames = min(self.queued_frames, max(0, int(elapsed * self.rate)))
+                elif self.last_callback is not None:
+                    self.played_frames = min(self.queued_frames, self.completed_frames)
+                else:
+                    self.played_frames = self.queued_frames
                 self.lib.AudioQueueStop(self.queue, True)
         finally:
             _dispose(self.handle)
@@ -365,7 +391,7 @@ def _device_name(coreaudio, corefoundation, device: int) -> str | None:
     if status != 0 or not pointer.value:
         return None
     try:
-        buffer = ctypes.create_string_buffer(512)
+        buffer = ctypes.create_string_buffer(NAME_LIMIT * 4 + 1)
         copied = corefoundation.CFStringGetCString(
             pointer, buffer, len(buffer), CF_STRING_ENCODING_UTF8
         )
@@ -403,7 +429,7 @@ def _nominal_rates(coreaudio, device: int) -> list[float] | None:
 
 def _stream_formats(
     coreaudio, device: int, nominal: list[float]
-) -> list[tuple[float, float, int]] | None:
+) -> list[tuple[float, float, int, str]] | None:
     address = _address(DEVICE_STREAMS)
     size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, device, address)
     if size is None:
@@ -442,7 +468,7 @@ def _stream_formats(
             for item in items:
                 fmt = item.mFormat
                 label = _format_label(fmt)
-                if label is not None and fmt.mChannelsPerFrame in {1, 2}:
+                if label is not None and fmt.mChannelsPerFrame >= 1:
                     formats.append(
                         (
                             item.mSampleRateRange.mMinimum,
@@ -466,7 +492,8 @@ def _format_label(fmt: StreamDescription) -> str | None:
     flags = int(fmt.mFormatFlags)
     if flags & 1:
         return {32: "f32", 64: "f64"}.get(bits, "その他")
-    if flags & 2:
+    # kAudioFormatFlagIsSignedInteger は 1<<2。1<<1 は big-endian。
+    if flags & 4:
         return {8: "i8", 16: "i16", 32: "i32", 64: "i64"}.get(bits, "その他")
     return {8: "u8", 16: "u16", 32: "u32", 64: "u64"}.get(bits, "その他")
 
@@ -497,7 +524,7 @@ def _mismatch(rate: int, formats) -> str:
     entries: list[str] = []
     for item in formats:
         minimum, maximum, channels = item[0], item[1], item[2]
-        if channels not in {1, 2}:
+        if channels < 1:
             continue
         label = item[3] if len(item) >= 4 else "f32"
         span = f"{minimum:g}Hz" if minimum == maximum else f"{minimum:g}〜{maximum:g}Hz"
