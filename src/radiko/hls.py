@@ -30,6 +30,7 @@ class MediaPlaylist:
     end_list: bool = False
     version: int | None = None
     i_frames_only: bool = False
+    discontinuity_sequence: int = 0
 
 
 @dataclass
@@ -177,6 +178,7 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
     if not lines or lines[0] != "#EXTM3U":
         raise ProbeError("playlist")
     sequence = 0
+    discontinuity_sequence = 0
     target = None
     end_list = False
     i_frames_only = False
@@ -192,6 +194,8 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
         try:
             if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
                 sequence = int(line.split(":", 1)[1])
+            elif line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE:"):
+                discontinuity_sequence = int(line.split(":", 1)[1])
             elif line.startswith("#EXT-X-TARGETDURATION:"):
                 target = int(line.split(":", 1)[1])
             elif line == "#EXT-X-ENDLIST":
@@ -237,7 +241,14 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
             raise ProbeError("playlist") from error
     if target is None:
         raise ProbeError("playlist")
-    media = MediaPlaylist(sequence, target, segments, end_list, i_frames_only=i_frames_only)
+    media = MediaPlaylist(
+        sequence,
+        target,
+        segments,
+        end_list,
+        i_frames_only=i_frames_only,
+        discontinuity_sequence=discontinuity_sequence,
+    )
     validate_media(media)
     return media
 

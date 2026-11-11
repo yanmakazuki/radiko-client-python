@@ -21,7 +21,9 @@ from radiko.domain import (
     ProgramKey,
     Station,
 )
+from radiko.stream import ProbeError
 from radiko.text import clean_text
+from radiko.urls import trusted
 
 MAX_SCHEDULE_BYTES = 4 * 1024 * 1024
 MAX_PROGRAMS = 2048
@@ -246,7 +248,12 @@ def parse_endpoints(data: bytes, timefree: bool, outside: bool) -> list[str]:
         if node.attrib.get("timefree") != ("1" if timefree else "0"):
             continue
         target = _text(node, "playlist_create_url")
-        if target and target not in urls:
+        if not target:
+            continue
+        # XML を信じる前に、再生に使うホストを確定する。Rust の endpoints() と同じ。
+        if not trusted(target):
+            raise ProbeError("unsafe")
+        if target not in urls:
             urls.append(target)
     if not urls:
         raise ValueError("対象モードと地域に対応する配信先がありません")

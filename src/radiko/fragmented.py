@@ -9,7 +9,7 @@ from __future__ import annotations
 import av
 import numpy as np
 
-from radiko.media import MAX_SEGMENT_BYTES, AacError, validate_mp4
+from radiko.media import MAX_PCM_BYTES, MAX_SEGMENT_BYTES, AacError, validate_mp4
 
 _RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
 
@@ -23,6 +23,7 @@ class FragmentPcm:
         samples: np.ndarray,
         rate: int,
         channels: int,
+        packets: int = 0,
     ):
         self.decode_time = decode_time
         self.timescale = timescale
@@ -30,6 +31,7 @@ class FragmentPcm:
         self.samples = samples
         self.sample_rate = rate
         self.channels = channels
+        self.packets = packets
         self.frames = len(samples) // max(channels, 1)
 
     def __repr__(self) -> str:
@@ -158,6 +160,14 @@ class FragmentedAacDecoder:
         if timescale == 0:
             raise AacError("container")
         minf = _atoms(_one(mdia, b"minf").data)
+        if any(item.kind == b"dinf" for item in minf):
+            dinf = _atoms(_one(minf, b"dinf").data)
+            dref = _one(dinf, b"dref").data
+            if len(dref) < 8 or _word(dref, 0) != 0 or _word(dref, 4) != 1:
+                raise AacError("unsupported-container")
+            refs = _atoms(dref[8:])
+            if len(refs) != 1 or refs[0].kind != b"url " or refs[0].data != b"\x00\x00\x00\x01":
+                raise AacError("unsupported-container")
         stbl = _atoms(_one(minf, b"stbl").data)
         for kind in (b"stts", b"stsc", b"stco"):
             table = _one(stbl, kind).data
@@ -181,8 +191,9 @@ class FragmentedAacDecoder:
         asc = _decoder_specific(_one(description, b"esds").data)
         rate, channels = _asc_config(asc)
         tkhd = _one(trak, b"tkhd").data
-        version = tkhd[0]
-        track = _word(tkhd, 20 if version == 1 else 12)
+        if not tkhd or tkhd[0] not in {0, 1}:
+            raise AacError("container")
+        track = _word(tkhd, 20 if tkhd[0] == 1 else 12)
         if track == 0:
             raise AacError("container")
         trex = _one(_atoms(_one(moov, b"mvex").data), b"trex").data
@@ -199,10 +210,10 @@ class FragmentedAacDecoder:
         self.next_time: int | None = None
         self.next_sequence: int | None = None
 
-    def decode_pcm(self, data: bytes, cancelled=None) -> FragmentPcm:
+    def decode_pcm(self, data: bytes, cancelled=None, declared: str | None = None) -> FragmentPcm:
         cancelled = cancelled or (lambda: False)
         try:
-            result = self._decode(data, cancelled)
+            result = self._decode(data, cancelled, declared)
         except Exception:
             self._codec = None
             self.next_time = None
@@ -237,6 +248,8 @@ class FragmentedAacDecoder:
         if len(mfhd) != 8 or _word(mfhd, 0) != 0:
             raise AacError("container")
         sequence = _word(mfhd, 4)
+        if sequence == 0xFFFFFFFF:
+            raise AacError("container")
         if self.next_sequence is not None and self.next_sequence != sequence:
             raise AacError("container")
         traf = _atoms(_one(children, b"traf").data)
@@ -317,15 +330,18 @@ class FragmentedAacDecoder:
             cursor = end
         if cursor_at != len(trun) or cursor != len(mdat.data):
             raise AacError("container")
+        next_time = decode_time + duration
+        if next_time > 0xFFFFFFFFFFFFFFFF:
+            raise AacError("container")
         return {
             "decode_time": decode_time,
             "duration": duration,
-            "next_time": decode_time + duration,
+            "next_time": next_time,
             "next_sequence": sequence + 1,
             "packets": packets,
         }
 
-    def _decode(self, data: bytes, cancelled) -> FragmentPcm:
+    def _decode(self, data: bytes, cancelled, declared: str | None) -> FragmentPcm:
         media = self._read(data, cancelled)
         if self._codec is None:
             context = av.CodecContext.create("aac", "r")
@@ -334,6 +350,8 @@ class FragmentedAacDecoder:
             context.layout = "mono" if self.channels == 1 else "stereo"
             self._codec = context
         samples: list[np.ndarray] = []
+        rate = self.sample_rate
+        channels = self.channels
         for packet in media["packets"]:
             if cancelled():
                 raise AacError("cancelled")
@@ -341,16 +359,26 @@ class FragmentedAacDecoder:
                 plane = frame.to_ndarray()
                 if plane.ndim == 1:
                     interleaved = plane.reshape(-1)
+                    channels = 1
                 else:
                     interleaved = plane.reshape(-1, order="F")
+                    channels = plane.shape[0]
+                rate = frame.sample_rate
                 samples.append(np.ascontiguousarray(interleaved, dtype=np.float32))
-        channels = self.channels
         if not samples:
             raise AacError("empty")
         pcm = np.concatenate(samples) if len(samples) > 1 else samples[0]
-        frames = pcm.size // channels
-        if frames * self.timescale != media["duration"] * self.sample_rate:
+        if pcm.size * 4 > MAX_PCM_BYTES:
+            raise AacError("large")
+        frames = pcm.size // max(channels, 1)
+        if frames * self.timescale != media["duration"] * rate:
             raise AacError("container")
+        sbr = rate > self.sample_rate
+        if declared and any(
+            part.strip() in {"mp4a.40.5", "mp4a.40.29"} for part in declared.split(",")
+        ):
+            if not sbr:
+                raise AacError("sbr-missing")
         if cancelled():
             raise AacError("cancelled")
         self.next_time = media["next_time"]
@@ -360,8 +388,9 @@ class FragmentedAacDecoder:
             self.timescale,
             media["duration"],
             pcm,
-            self.sample_rate,
+            rate,
             channels,
+            len(media["packets"]),
         )
 
 
