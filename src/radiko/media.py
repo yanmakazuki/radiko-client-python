@@ -7,6 +7,7 @@ PCM ビット列にはならない。拒否するヘッダーと箱の上限は�
 from __future__ import annotations
 
 import io
+import struct
 import time
 from dataclasses import dataclass
 
@@ -19,6 +20,8 @@ MAX_ENTRIES = 4096
 MAX_BOXES = 8192
 MAX_PCM_BYTES = 4 * 1024 * 1024
 _RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
+_ADTS_HEADER = struct.Struct(">BBBBBBB")
+_WORD = struct.Struct(">I")
 
 
 class AacError(Exception):
@@ -118,37 +121,69 @@ def split_adts(data: bytes, cancelled) -> list[_Frame]:
     if offset > len(data):
         raise AacError("metadata")
     view = memoryview(data)
-    total = len(view)
-    pos = offset
     frames: list[_Frame] = []
+    _walk_adts(view, len(view), offset, cancelled, frames, False)
+    return frames
+
+
+def _adts_header(view, pos: int) -> tuple[int, int, int, int, int]:
+    """(object_type, sample_rate, channels, frame_length, header_len) を整数だけで返す。"""
+    first, second, third, fourth, fifth, sixth, _ = _ADTS_HEADER.unpack_from(view, pos)
+    if first != 0xFF or second & 0xF0 != 0xF0:
+        raise AacError("header")
+    if (second >> 1) & 0x3 != 0:
+        raise AacError("header")
+    profile = (third >> 6) & 0x3
+    rate_index = (third >> 2) & 0xF
+    if rate_index >= len(_RATES):
+        raise AacError("header")
+    channels = ((third & 1) << 2) | ((fourth >> 6) & 0x3)
+    frame_length = ((fourth & 0x3) << 11) | (fifth << 3) | ((sixth >> 5) & 0x7)
+    header_len = 7 if second & 1 else 9
+    return profile + 1, _RATES[rate_index], channels, frame_length, header_len
+
+
+def _walk_adts(view, total: int, pos: int, cancelled, frames, strict: bool):
+    """ADTS を1回走査する。frames が None のときはペイロードを複製しない。
+
+    戻り値は (パケット数, 先頭パケットの形式)。strict のときだけ形式の混在を
+    「changed」として弾く。検証の順序は split_adts の従来動作に合わせる。
+    """
+    count = 0
+    core = None
+    changed = False
     while pos < total:
         if cancelled():
             raise AacError("cancelled")
-        if len(frames) >= MAX_PACKETS:
+        if count >= MAX_PACKETS:
             raise AacError("many")
         if total - pos < 7:
             raise AacError("truncated")
-        header = _parse_adts(view[pos : pos + 7])
-        if header["frame_length"] <= header["header_len"]:
+        object_type, rate, channels, length, header_len = _adts_header(view, pos)
+        if length <= header_len:
             raise AacError("header")
-        if header["frame_length"] > total - pos:
+        if length > total - pos:
             raise AacError("truncated")
-        if header["header_len"] != 7 or view[pos + 6] & 3 != 0:
+        if header_len != 7 or view[pos + 6] & 3 != 0:
             raise AacError("transport")
-        if header["channels"] == 0 or header["channels"] > 7 or header["object_type"] != 2:
+        if channels == 0 or channels > 7 or object_type != 2:
             raise AacError("codec")
-        frames.append(
-            _Frame(
-                header["object_type"],
-                header["sample_rate"],
-                header["channels"],
-                bytes(view[pos + header["header_len"] : pos + header["frame_length"]]),
+        current = (object_type, rate, channels)
+        if core is None:
+            core = current
+        elif core != current:
+            changed = True
+        if frames is not None:
+            frames.append(
+                _Frame(object_type, rate, channels, bytes(view[pos + header_len : pos + length]))
             )
-        )
-        pos += header["frame_length"]
-    if not frames:
+        count += 1
+        pos += length
+    if not count:
         raise AacError("empty")
-    return frames
+    if changed and strict:
+        raise AacError("changed")
+    return count, core
 
 
 def _parse_adts(data) -> dict:
@@ -184,19 +219,21 @@ class AdtsDecoder:
     ) -> DecodedPcm:
         cancelled = cancelled or (lambda: False)
         try:
-            frames = split_adts(data, cancelled)
             if cancelled():
                 raise AacError("cancelled")
-            current = (frames[0].object_type, frames[0].sample_rate, frames[0].channels)
-            if any(
-                (frame.object_type, frame.sample_rate, frame.channels) != current
-                for frame in frames
-            ):
-                raise AacError("changed")
+            if len(data) > MAX_SEGMENT_BYTES:
+                raise AacError("large")
+            offset = audio_offset(data)
+            if offset > len(data):
+                raise AacError("metadata")
+            view = memoryview(data)
+            packets, current = _walk_adts(view, len(view), offset, cancelled, None, True)
+            if cancelled():
+                raise AacError("cancelled")
             if self.format is not None and self.format != current:
                 raise AacError("changed")
             started = time.perf_counter()
-            samples, rate, channels = _decode_adts(data)
+            samples, rate, channels = _decode_adts(view[offset:])
             if cancelled():
                 raise AacError("cancelled")
             if len(samples) * 4 > MAX_PCM_BYTES:
@@ -206,7 +243,7 @@ class AdtsDecoder:
                 core_channels=current[2],
                 sample_rate=rate,
                 channels=channels,
-                packets=len(frames),
+                packets=packets,
                 frames=samples.size // max(channels, 1),
                 sbr_detected=rate > current[1],
                 stereo_expansion=channels > current[2],
@@ -229,7 +266,7 @@ class AdtsDecoder:
             raise
 
 
-def _decode_adts(data: bytes) -> tuple[np.ndarray, int, int]:
+def _decode_adts(data: bytes | memoryview) -> tuple[np.ndarray, int, int]:
     try:
         container = av.open(io.BytesIO(data), format="aac")
     except av.FFmpegError as error:
@@ -280,10 +317,10 @@ def _looks_like_box(data: bytes) -> bool:
 
 
 def _word(data, offset: int) -> int:
-    chunk = data[offset : offset + 4]
-    if len(chunk) != 4:
-        raise AacError("container")
-    return int.from_bytes(chunk, "big")
+    try:
+        return _WORD.unpack_from(data, offset)[0]
+    except struct.error as error:
+        raise AacError("container") from error
 
 
 def _walk(data, depth: int, boxes: int, samples: int) -> tuple[int, int]:

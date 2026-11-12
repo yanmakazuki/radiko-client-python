@@ -6,12 +6,15 @@ Rust の `FragmentedAacDecoder` と同じ条件で拒否する。
 
 from __future__ import annotations
 
+import struct
+
 import av
 import numpy as np
 
 from radiko.media import MAX_PCM_BYTES, MAX_SEGMENT_BYTES, AacError, validate_mp4
 
 _RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
+_WORD = struct.Struct(">I")
 
 
 class FragmentPcm:
@@ -80,10 +83,10 @@ def _one(items: list[_Atom], kind: bytes) -> _Atom:
 
 
 def _word(data, at: int) -> int:
-    chunk = data[at : at + 4]
-    if len(chunk) != 4:
-        raise AacError("container")
-    return int.from_bytes(chunk, "big")
+    try:
+        return _WORD.unpack_from(data, at)[0]
+    except struct.error as error:
+        raise AacError("container") from error
 
 
 def _take(data, at: int) -> tuple[int, int]:
@@ -326,7 +329,7 @@ class FragmentedAacDecoder:
             piece = mdat.data[cursor:end]
             if len(piece) != size:
                 raise AacError("container")
-            packets.append(bytes(piece))
+            packets.append(piece)
             cursor = end
         if cursor_at != len(trun) or cursor != len(mdat.data):
             raise AacError("container")
