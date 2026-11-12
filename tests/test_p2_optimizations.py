@@ -287,10 +287,23 @@ def test_help_text_is_cached_and_render_calls_visible_once(monkeypatch):
 
 import tracemalloc  # noqa: E402
 
-from radiko.fixtures import box, words  # noqa: E402
-from radiko.fragmented import _atoms  # noqa: E402
+from radiko.fixtures import (  # noqa: E402
+    box,
+    encode_adts_sine,
+    synthetic_fragment,
+    synthetic_init,
+    words,
+)
+from radiko.fragmented import FragmentedAacDecoder, _atoms  # noqa: E402
 from radiko.fragmented import _word as atom_word  # noqa: E402
-from radiko.media import _parse_adts, audio_offset, split_adts, validate_mp4  # noqa: E402
+from radiko.media import (  # noqa: E402
+    AacError,
+    AdtsDecoder,
+    _parse_adts,
+    audio_offset,
+    split_adts,
+    validate_mp4,
+)
 
 
 def adts_frame(payload: bytes, rate_index: int = 4, channels: int = 2) -> bytes:
@@ -361,6 +374,26 @@ def test_split_adts_matches_legacy_and_returns_bytes_payloads():
     assert [frame.payload for frame in split_adts(skipping, lambda: False)] == [
         item[3] for item in expected
     ]
+
+
+def test_decode_rejects_mixed_adts_formats_while_split_keeps_the_frames():
+    mixed = adts_frame(b"\x01" * 8, rate_index=4) + adts_frame(b"\x02" * 8, rate_index=3)
+    assert len(split_adts(mixed, lambda: False)) == 2
+    with pytest.raises(AacError) as raised:
+        AdtsDecoder().decode_segment_pcm(mixed)
+    assert raised.value.code == "changed"
+
+
+def test_fragmented_read_keeps_packet_views_inside_the_segment():
+    adts = encode_adts_sine(packets=4)
+    packets = [frame.payload for frame in split_adts(adts, lambda: False)]
+    init = synthetic_init(b"\x11\x90", 48000, 1024, 200)
+    fragment = synthetic_fragment(packets, 0, 1)
+    decoder = FragmentedAacDecoder(init)
+    read = decoder._read(fragment, lambda: False)
+    assert [len(packet) for packet in read["packets"]] == [len(packet) for packet in packets]
+    assert all(isinstance(packet, memoryview) for packet in read["packets"])
+    assert all(packet.obj is fragment for packet in read["packets"])
 
 
 def test_atoms_matches_legacy_for_nested_and_large_boxes():

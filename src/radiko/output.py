@@ -81,6 +81,10 @@ def _supports_f32(rate: int, channels: int) -> bool | None:
         _close(opened)
 
 
+def _mismatch_none(rate: int) -> str:
+    return f"必要な形式は{rate}Hzのmonoまたはstereoのf32・i16・i32です。機器の対応範囲: なし"
+
+
 def inspect_default_output(rate: int) -> OutputInfo:
     if not PCM_RATE_MIN <= rate <= PCM_RATE_MAX:
         raise OutputError("device", "サンプルレートは8000〜192000Hzで指定してください")
@@ -94,10 +98,7 @@ def inspect_default_output(rate: int) -> OutputInfo:
     chosen = _select_format(opened, rate)
     _close(opened)
     if chosen is None:
-        mismatch = (
-            f"必要な形式は{rate}Hzのmonoまたはstereoのf32・i16・i32です。機器の対応範囲: なし"
-        )
-        return OutputInfo("default", rate, None, None, mismatch)
+        return OutputInfo("default", rate, None, None, _mismatch_none(rate))
     sample_format, channels = chosen
     return OutputInfo("default", rate, sample_format, channels, "")
 
@@ -162,7 +163,7 @@ class _AlsaStream(OutputStream):
         chosen = _select_format(opened, rate)
         if chosen is None:
             _close(opened)
-            raise OutputError("device", inspect_default_output(rate).mismatch)
+            raise OutputError("device", _mismatch_none(rate))
         sample_format, out_channels = chosen
         super().__init__(rate, channels, sample_format, out_channels)
         self.stop = stop or threading.Event()
@@ -251,11 +252,12 @@ def probe_silent(seconds: int, stop, on_progress=None) -> OutputSummary:
         raise OutputError("device", "無音の出力診断は1〜1800秒で指定してください")
     rate = 48000
     channels = 2
+    silence = _silence(rate * channels)
     with open_stream(rate, channels, stop) as stream:
         for index in range(seconds):
             if stop.is_set():
                 break
-            stream.write(np.zeros(rate * channels, dtype=np.float32))
+            stream.write(silence)
             if on_progress is not None and (index + 1) % 5 == 0:
                 on_progress(stream.summary())
         stream.close()
@@ -297,10 +299,41 @@ def _remix(block, src: int, dst: int, frames: int) -> np.ndarray:
 
 
 def _alsa():
-    path = ctypes.util.find_library("asound")
+    path = _find("asound")
     if not path:
         return None
-    library = ctypes.CDLL(path)
+    library = _open_library(path)
+    _bind_alsa(library)
+    return library
+
+
+# 解決済みのパスごとに CDLL と署名を一度だけ用意する。find_library を差し替えた
+# テストでは解決関数が変わるので、そのときだけ引き直す。
+_library_paths: dict[str, tuple[object, str | None]] = {}
+_libraries: dict[str, object] = {}
+
+
+def _find(name: str):
+    finder = ctypes.util.find_library
+    cached = _library_paths.get(name)
+    if cached is not None and cached[0] is finder:
+        return cached[1]
+    path = finder(name)
+    _library_paths[name] = (finder, path)
+    return path
+
+
+def _open_library(path: str):
+    library = _libraries.get(path)
+    if library is None:
+        library = ctypes.CDLL(path)
+        _libraries[path] = library
+    return library
+
+
+def _bind_alsa(library) -> None:
+    if getattr(library, "_radiko_signed", False):
+        return
     library.snd_pcm_open.argtypes = [
         ctypes.POINTER(ctypes.c_void_p),
         ctypes.c_char_p,
@@ -326,7 +359,10 @@ def _alsa():
     library.snd_pcm_recover.restype = ctypes.c_int
     library.snd_pcm_prepare.argtypes = [ctypes.c_void_p]
     library.snd_pcm_prepare.restype = ctypes.c_int
-    return library
+    try:
+        library._radiko_signed = True
+    except (AttributeError, TypeError):
+        pass  # 署名を記録できない相手でも、毎回設定し直せば同じ結果になる。
 
 
 _FORMATS = (("f32", 14), ("i32", 10), ("i16", 2))
@@ -418,10 +454,19 @@ def _recover(library, handle, code: int) -> None:
             raise OutputError("device")
 
 
+_SILENCE = np.zeros(0, dtype=np.float32)
+
+
+def _silence(size: int) -> np.ndarray:
+    """無音バッファをサイズ単位で使い回す。返り値は共有バッファのビュー。"""
+    global _SILENCE
+    if _SILENCE.size < size:
+        _SILENCE = np.zeros(max(size, _SILENCE.size * 2), dtype=np.float32)
+    return _SILENCE[:size]
+
+
 def _write_silence(opened, sample_format: str, channels: int, frames: int) -> tuple[int, int]:
-    return _write_pcm(
-        opened, np.zeros(frames * channels, dtype=np.float32), sample_format, channels
-    )
+    return _write_pcm(opened, _silence(frames * channels), sample_format, channels)
 
 
 _ALSA_ERROR = ctypes.CFUNCTYPE(

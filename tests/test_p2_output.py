@@ -354,3 +354,59 @@ def test_device_name_buffer_holds_256_multibyte_characters():
     name = coreaudio._device_name(_CoreAudio(), _CoreFoundation(), 5)
     assert seen["size"] >= 256 * 4 + 1
     assert name == long_name
+
+
+class _RefusingQueue(_FrozenQueue):
+    """エンキューだけ失敗する AudioQueue。確保済みバッファの解放を数える。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.freed = 0
+
+    def AudioQueueEnqueueBuffer(self, queue, buffer, count, descriptions):
+        return -1
+
+    def AudioQueueFreeBuffer(self, queue, buffer):
+        self.freed += 1
+        return 0
+
+
+def test_enqueue_failure_returns_the_allocated_buffer(monkeypatch):
+    backend = _RefusingQueue()
+    monkeypatch.setattr("radiko.coreaudio.library", lambda: backend)
+    monkeypatch.setattr("radiko.coreaudio.time", _Clock)
+    stream = coreaudio.Stream(48000, 2, threading.Event())
+    with pytest.raises(OutputError) as raised:
+        stream.write(np.zeros(48000 * 2, dtype=np.float32))
+    assert raised.value.code == "device"
+    assert backend.freed == 1
+    assert stream.outstanding == 0
+
+
+def test_alsa_stream_reports_a_mismatch_without_reopening_the_device(monkeypatch):
+    opens: list[int] = []
+
+    def fake_open():
+        opens.append(1)
+        return object(), object()
+
+    monkeypatch.setattr(output, "null_sink_enabled", lambda: False)
+    monkeypatch.setattr(output, "host_backend", lambda: "alsa")
+    monkeypatch.setattr(output, "_open_default", fake_open)
+    monkeypatch.setattr(output, "_select_format", lambda opened, rate: None)
+    monkeypatch.setattr(output, "_close", lambda opened: None)
+    with pytest.raises(OutputError) as raised:
+        output.open_stream(48000, 2, threading.Event())
+    assert raised.value.code == "device"
+    assert raised.value.message == (
+        "必要な形式は48000Hzのmonoまたはstereoのf32・i16・i32です。機器の対応範囲: なし"
+    )
+    assert len(opens) == 1
+
+
+def test_silence_buffer_is_reused_instead_of_allocated_per_pause():
+    first = output._silence(96000)
+    second = output._silence(96000)
+    assert first.size == 96000
+    assert np.shares_memory(first, second)
+    assert not first.any()

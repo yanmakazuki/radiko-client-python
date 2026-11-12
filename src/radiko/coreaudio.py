@@ -77,6 +77,40 @@ class AudioStreamRangedDescription(ctypes.Structure):
 
 _OUTPUT_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _callbacks: list = []
+# 解決済みのパスごとに CDLL と署名を一度だけ用意する。find_library を差し替えた
+# テストでは解決関数が変わるので、そのときだけ引き直す。
+_library_paths: dict[str, tuple[object, str | None]] = {}
+_libraries: dict[str, object] = {}
+
+
+def _find(name: str):
+    finder = ctypes.util.find_library
+    cached = _library_paths.get(name)
+    if cached is not None and cached[0] is finder:
+        return cached[1]
+    path = finder(name)
+    _library_paths[name] = (finder, path)
+    return path
+
+
+def _open_library(path: str):
+    loaded = _libraries.get(path)
+    if loaded is None:
+        loaded = ctypes.CDLL(path)
+        _libraries[path] = loaded
+    return loaded
+
+
+def library():
+    """darwin で AudioToolbox が見つかったときだけ返す。"""
+    if sys.platform != "darwin":
+        return None
+    path = _find("AudioToolbox")
+    if not path:
+        return None
+    loaded = _open_library(path)
+    _bind(loaded)
+    return loaded
 
 
 def _fourcc(text: str) -> int:
@@ -92,18 +126,6 @@ DEVICE_STREAMS = _fourcc("stm#")
 STREAM_AVAILABLE_FORMATS = _fourcc("pft?")
 STREAM_PHYSICAL_FORMAT = _fourcc("pft ")
 AUDIO_QUEUE_IS_RUNNING = _fourcc("aqrn")
-
-
-def library():
-    """darwin で AudioToolbox が見つかったときだけ返す。"""
-    if sys.platform != "darwin":
-        return None
-    path = ctypes.util.find_library("AudioToolbox")
-    if not path:
-        return None
-    loaded = ctypes.CDLL(path)
-    _bind(loaded)
-    return loaded
 
 
 def sanitize_device_name(text: str) -> str:
@@ -214,6 +236,10 @@ class Stream:
         status = self.lib.AudioQueueEnqueueBuffer(self.queue, buffer_ref, 0, None)
         if status != 0:
             self.outstanding -= 1
+            # キューに渡せなかったバッファは完了通知が来ないので、ここで返す。
+            free = getattr(self.lib, "AudioQueueFreeBuffer", None)
+            if free is not None:
+                free(self.queue, buffer_ref)
             raise OutputError("device")
 
     def _wait(self, deadline: float) -> None:
@@ -338,10 +364,10 @@ def _default_output():
 
 
 def _load(name: str):
-    path = ctypes.util.find_library(name)
+    path = _find(name)
     if not path:
         return None
-    return ctypes.CDLL(path)
+    return _open_library(path)
 
 
 def _address(selector: int, scope: int = SCOPE_GLOBAL, element: int = 0):
@@ -563,6 +589,8 @@ def _description(rate: int, channels: int) -> StreamDescription:
 
 
 def _bind(lib) -> None:
+    if getattr(lib, "_radiko_signed", False):
+        return
     signatures = {
         "AudioQueueNewOutput": (
             [
@@ -625,6 +653,10 @@ def _bind(lib) -> None:
         function = getattr(lib, name, None)
         if function is not None:
             _signature(function, argtypes, restype)
+    try:
+        lib._radiko_signed = True
+    except (AttributeError, TypeError):
+        pass  # 署名を記録できない相手でも、毎回設定し直せば同じ結果になる。
 
 
 def _signature(function, argtypes, restype) -> None:
