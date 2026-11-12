@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
+from radiko.hls import segment_wall as _segment_wall
 from radiko.media import AacError
 from radiko.stream import ProbeError
 
@@ -38,17 +39,7 @@ def accept_fragment(
 
 def segment_wall(media, sequence: int) -> datetime | None:
     """プレイリスト先頭から EXTINF を足して、その通し番号の番組時刻を求める。"""
-    stamp = None
-    cursor = media.media_sequence
-    for segment in media.segments:
-        if segment.program_date:
-            stamp = _parse_program_date(segment.program_date)
-        if cursor == sequence:
-            return stamp
-        if stamp is not None:
-            stamp = stamp + timedelta(seconds=segment.duration)
-        cursor += 1
-    return None
+    return _segment_wall(media, sequence)
 
 
 def trim_pcm(
@@ -78,10 +69,6 @@ def trim_pcm(
 
 def _microseconds(value: float) -> int:
     return int(round(value * 1_000_000))
-
-
-def _parse_program_date(text: str) -> datetime:
-    return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
 class ReconnectBudget:
