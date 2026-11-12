@@ -28,12 +28,17 @@ class ChapterError(Exception):
 def parse_chapters(data: bytes, slot_seconds: float, offset_seconds: float) -> ChapterSet:
     if len(data) > MAX_CHAPTER_BYTES:
         raise ChapterError("large")
-    if slot_seconds <= 0 or offset_seconds != offset_seconds or abs(offset_seconds) == float("inf"):
-        raise ChapterError("timeline")
+    _check_timeline(slot_seconds, offset_seconds)
     try:
         root = json.loads(data.decode())
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ChapterError("json") from error
+    return chapters_from_json(root, slot_seconds, offset_seconds)
+
+
+def chapters_from_json(root, slot_seconds: float, offset_seconds: float) -> ChapterSet:
+    """デコード済みの JSON から正規化する。サイズ上限は呼び出し側が確認する。"""
+    _check_timeline(slot_seconds, offset_seconds)
     items = root.get("chapters") if isinstance(root, dict) else None
     if not isinstance(items, list):
         raise ChapterError("array")
@@ -86,6 +91,11 @@ def parse_chapters(data: bytes, slot_seconds: float, offset_seconds: float) -> C
     if not result.chapters and result.invalid_count:
         raise ChapterError("none")
     return result
+
+
+def _check_timeline(slot_seconds: float, offset_seconds: float) -> None:
+    if slot_seconds <= 0 or offset_seconds != offset_seconds or abs(offset_seconds) == float("inf"):
+        raise ChapterError("timeline")
 
 
 def _display(value) -> str | None:

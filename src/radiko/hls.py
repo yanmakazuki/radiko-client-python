@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from radiko.stream import ProbeError
 
@@ -31,6 +32,18 @@ class MediaPlaylist:
     version: int | None = None
     i_frames_only: bool = False
     discontinuity_sequence: int = 0
+    _schedule: SegmentSchedule | None = field(default=None, init=False, repr=False, compare=False)
+
+
+@dataclass
+class SegmentSchedule:
+    """1パスで求めた各セグメントの番組時刻と累積不連続番号。"""
+
+    segments: list[Segment]
+    media_sequence: int
+    base: int
+    walls: list[datetime | None]
+    discontinuities: list[int]
 
 
 @dataclass
@@ -149,6 +162,62 @@ def validate_media(media: MediaPlaylist) -> None:
         raise ProbeError("playlist")
     if media.media_sequence + len(media.segments) > 2**64 - 1:
         raise ProbeError("playlist")
+
+
+def segment_schedule(media: MediaPlaylist) -> SegmentSchedule:
+    """EXTINF と PROGRAM-DATE-TIME を1パスで畳み込み、添字参照できる表にする。
+
+    セグメント列と開始番号が同じ間は前回の表を使い回す。解析後のセグメントは
+    不変であり、窓の更新は新しい `MediaPlaylist` を組み立てて行う。
+    """
+    schedule = getattr(media, "_schedule", None)
+    base = getattr(media, "discontinuity_sequence", 0)
+    segments = media.segments
+    if (
+        schedule is not None
+        and schedule.segments is segments
+        and schedule.media_sequence == media.media_sequence
+        and schedule.base == base
+    ):
+        return schedule
+    walls: list[datetime | None] = []
+    discontinuities: list[int] = []
+    wall = None
+    count = 0
+    for segment in segments:
+        if segment.program_date:
+            wall = _parse_program_date(segment.program_date)
+        walls.append(wall)
+        if segment.discontinuity:
+            count += 1
+        discontinuities.append(base + count)
+        if wall is not None:
+            wall = wall + timedelta(seconds=segment.duration)
+    schedule = SegmentSchedule(segments, media.media_sequence, base, walls, discontinuities)
+    media._schedule = schedule
+    return schedule
+
+
+def segment_wall(media: MediaPlaylist, sequence: int) -> datetime | None:
+    """その通し番号の番組時刻。窓の外なら None。"""
+    schedule = segment_schedule(media)
+    offset = sequence - media.media_sequence
+    if 0 <= offset < len(schedule.walls):
+        return schedule.walls[offset]
+    return None
+
+
+def segment_discontinuity(media: MediaPlaylist, sequence: int) -> int | None:
+    """開始番号を基準にした、その通し番号までの累積不連続番号。窓の外なら None。"""
+    schedule = segment_schedule(media)
+    offset = sequence - media.media_sequence
+    if 0 <= offset < len(schedule.discontinuities):
+        return schedule.discontinuities[offset]
+    return None
+
+
+def _parse_program_date(text: str) -> datetime:
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
 def live_join_index(media: MediaPlaylist) -> int:

@@ -14,10 +14,10 @@ import numpy as np
 
 from radiko import auth, output
 from radiko.catalog import CatalogError, parse_endpoints, parse_stations
-from radiko.chapters import ChapterError, parse_chapters
+from radiko.chapters import MAX_CHAPTER_BYTES, ChapterError, chapters_from_json
 from radiko.domain import JST, ProgramKey, broadcast_day
 from radiko.fragmented import FragmentedAacDecoder
-from radiko.hls import HlsCursor, parse_media_playlist
+from radiko.hls import HlsCursor, parse_media_playlist, segment_discontinuity, segment_schedule
 from radiko.http_client import stream_get, transport_overrides
 from radiko.interactive import InteractiveControl
 from radiko.media import AacError, AdtsDecoder, id3_offset
@@ -478,8 +478,12 @@ def _sample(
     decode_error = None
     samples = None
     offset = id3_offset(blob)
-    audio = blob[offset:] if offset is not None else b""
-    adts = len(audio) >= 2 and audio[0] == 0xFF and (audio[1] & 0xF0) == 0xF0
+    adts = (
+        offset is not None
+        and len(blob) - offset >= 2
+        and blob[offset] == 0xFF
+        and (blob[offset + 1] & 0xF0) == 0xF0
+    )
     if container == "encrypted":
         decode_error = None
     elif container.startswith("ISO BMFF") and sample:
@@ -618,24 +622,28 @@ def _apply_seek(control, media, sequence: int, media_seconds: float, origin: dat
     target = control.accepted[-1]
     control.applied = len(control.accepted)
     target_at = origin + timedelta(seconds=target)
+    schedule = segment_schedule(media)
+    first_wall = None
+    last_wall = None
+    last_duration = 0.0
     cursor = media.media_sequence
-    walls = []
-    for segment in media.segments:
-        wall = segment_wall(media, cursor)
-        if wall is not None:
-            walls.append((wall, segment.duration))
-        cursor += 1
-    if walls and (
-        target_at < walls[0][0] or target_at >= walls[-1][0] + timedelta(seconds=walls[-1][1])
+    skipping = True
+    for segment, wall in zip(media.segments, schedule.walls):
+        if wall is None:
+            skipping = False
+            continue
+        if first_wall is None:
+            first_wall = wall
+        last_wall = wall
+        last_duration = segment.duration
+        if skipping and target_at >= wall + timedelta(seconds=segment.duration):
+            cursor += 1
+        else:
+            skipping = False
+    if first_wall is not None and (
+        target_at < first_wall or target_at >= last_wall + timedelta(seconds=last_duration)
     ):
         return sequence, media_seconds, pending, target
-    cursor = media.media_sequence
-    for segment in media.segments:
-        wall = segment_wall(media, cursor)
-        if wall is not None and target_at >= wall + timedelta(seconds=segment.duration):
-            cursor += 1
-            continue
-        break
     return cursor, target, (target_at, target), None
 
 
@@ -647,16 +655,7 @@ def _segment_at(media, sequence: int):
 
 
 def _segment_discontinuity(media, sequence: int):
-    base = getattr(media, "discontinuity_sequence", 0)
-    count = 0
-    cursor = media.media_sequence
-    for segment in media.segments:
-        if segment.discontinuity:
-            count += 1
-        if cursor == sequence:
-            return base + count
-        cursor += 1
-    return None
+    return segment_discontinuity(media, sequence)
 
 
 def _refresh_playlist(
@@ -1353,11 +1352,17 @@ def inspect_remote_chapters(station: str, cursor: datetime, cancelled=None) -> C
         root = json.loads(reply.body.decode())
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ChapterFailure("チャプター解析失敗: チャプターJSONを解析できません") from error
-    if root.get("stationId") != station or root.get("programId") != program.event_id:
+    if (
+        not isinstance(root, dict)
+        or root.get("stationId") != station
+        or root.get("programId") != program.event_id
+    ):
         raise ChapterFailure("チャプター応答の局・イベントが対象と一致しません")
     duration = (program.end - program.start).total_seconds()
     try:
-        parsed = parse_chapters(reply.body, duration, 0.0)
+        if len(reply.body) > MAX_CHAPTER_BYTES:
+            raise ChapterError("large")
+        parsed = chapters_from_json(root, duration, 0.0)
     except ChapterError as error:
         raise ChapterFailure(f"チャプター解析失敗: {error}") from error
     if not parsed.chapters and parsed.invalid_count == 0:
