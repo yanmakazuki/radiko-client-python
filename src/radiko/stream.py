@@ -78,13 +78,20 @@ _TEXT = {
 
 
 def parse_time(text: str) -> datetime:
-    if len(text) != 14 or not text.isdigit():
+    if len(text) != 14 or not text.isascii() or not text.isdigit():
         raise ProbeError("input")
     try:
-        parsed = datetime.strptime(text, "%Y%m%d%H%M%S")
+        return datetime(
+            int(text[0:4]),
+            int(text[4:6]),
+            int(text[6:8]),
+            int(text[8:10]),
+            int(text[10:12]),
+            int(text[12:14]),
+            tzinfo=JST,
+        )
     except ValueError as error:
         raise ProbeError("input") from error
-    return parsed.replace(tzinfo=JST)
 
 
 def validate_station(station: str) -> None:

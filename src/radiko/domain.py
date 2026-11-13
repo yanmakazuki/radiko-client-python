@@ -24,12 +24,19 @@ def parse_jst(text: str) -> datetime:
 
 def rfc3339(moment: datetime) -> str:
     """端末のタイムゾーンではなく、値が持つ UTC オフセットを保つ。"""
-    offset = moment.strftime("%z")
+    stamp = (
+        f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}"
+        f"T{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}"
+    )
     fraction = ""
     if moment.microsecond:
         digits = f"{moment.microsecond:06d}"
         fraction = "." + (digits[:3] if moment.microsecond % 1000 == 0 else digits)
-    return moment.strftime("%Y-%m-%dT%H:%M:%S") + fraction + offset[:3] + ":" + offset[3:]
+    offset = moment.utcoffset()
+    seconds = 0 if offset is None else int(offset.total_seconds())
+    sign = "-" if seconds < 0 else "+"
+    seconds = abs(seconds)
+    return f"{stamp}{fraction}{sign}{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
 
 
 def broadcast_day(now: datetime) -> date:
@@ -311,6 +318,25 @@ class ObservedClassifications:
                 genres.add((item.id, item.name))
             for item in program.personality_genres:
                 personalities.add((item.id, item.name))
+        return cls(
+            [Classification(item_id, name) for item_id, name in sorted(genres)],
+            [Classification(item_id, name) for item_id, name in sorted(personalities)],
+            unclassified_programs,
+            unclassified_personalities,
+        )
+
+    @classmethod
+    def merge(cls, observed: list[ObservedClassifications]) -> ObservedClassifications:
+        """`collect` の結果を、番組を走査し直さずに統合する。"""
+        genres: set[tuple[str, str]] = set()
+        personalities: set[tuple[str, str]] = set()
+        unclassified_programs = 0
+        unclassified_personalities = 0
+        for item in observed:
+            genres.update((entry.id, entry.name) for entry in item.program_genres)
+            personalities.update((entry.id, entry.name) for entry in item.personality_genres)
+            unclassified_programs += item.unclassified_programs
+            unclassified_personalities += item.unclassified_personalities
         return cls(
             [Classification(item_id, name) for item_id, name in sorted(genres)],
             [Classification(item_id, name) for item_id, name in sorted(personalities)],

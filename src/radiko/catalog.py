@@ -173,28 +173,40 @@ def parse_programs(data: bytes, station: str, day: date) -> ProgramList:
             result.duplicate_count += 1
             continue
         seen.add(identity)
-        title = clean_text(_text(item, "title")) or "無題"
+        texts: dict[str, str] = {}
+        genre = None
+        tag_nodes = []
+        for child in item:
+            name = _local(child.tag)
+            if name == "tag":
+                tag_nodes.append(child)
+            elif name == "genre":
+                if genre is None:
+                    genre = child
+            elif name in {"title", "pfm", "desc", "info"} and name not in texts:
+                texts[name] = child.text or ""
+        title = clean_text(texts.get("title", "")) or "無題"
         tags = []
         seen_tags: set[str] = set()
-        for tag in _descendants(item, "tag"):
+        for tag in tag_nodes:
             for name in _child_texts(tag, "item", "name"):
                 cleaned = clean_text(name)
                 if cleaned and cleaned not in seen_tags:
                     seen_tags.add(cleaned)
                     tags.append(cleaned)
-        genre = next((child for child in item if _local(child.tag) == "genre"), None)
+        program_genres, personality_genres = _genre_classes(genre)
         result.programs.append(
             Program(
                 key=ProgramKey(station, starts_at),
                 program_id=clean_text(item.attrib.get("id", "")),
                 ends_at=ends_at,
                 title=title,
-                performer=clean_text(_text(item, "pfm")),
-                description=clean_text(_text(item, "desc")),
-                info=clean_text(_text(item, "info")),
+                performer=clean_text(texts.get("pfm", "")),
+                description=clean_text(texts.get("desc", "")),
+                info=clean_text(texts.get("info", "")),
                 tags=tags,
-                program_genres=_classes(genre, "program"),
-                personality_genres=_classes(genre, "personality"),
+                program_genres=program_genres,
+                personality_genres=personality_genres,
             )
         )
     if not result.programs and result.invalid_count:
@@ -265,10 +277,10 @@ def _local(tag: str) -> str:
 
 
 def _text(node: ET.Element, name: str) -> str:
-    child = next((item for item in node if _local(item.tag) == name), None)
-    if child is None or child.text is None:
-        return ""
-    return child.text
+    for child in node:
+        if _local(child.tag) == name:
+            return child.text or ""
+    return ""
 
 
 def _child_texts(node: ET.Element, item_name: str, name: str) -> list[str]:
@@ -280,17 +292,15 @@ def _child_texts(node: ET.Element, item_name: str, name: str) -> list[str]:
     return values
 
 
-def _descendants(node: ET.Element, name: str) -> list[ET.Element]:
-    return [child for child in node if _local(child.tag) == name]
-
-
-def _classes(genre: ET.Element | None, kind: str) -> list[Classification]:
+def _genre_classes(genre: ET.Element | None) -> tuple[list[Classification], list[Classification]]:
+    """`genre` の子を1パスで走査し、番組ジャンルと出演者分類を分けて返す。"""
     if genre is None:
-        return []
-    seen: set[tuple[str, str]] = set()
-    result = []
+        return [], []
+    seen: dict[str, set[tuple[str, str]]] = {"program": set(), "personality": set()}
+    results: dict[str, list[Classification]] = {"program": [], "personality": []}
     for child in genre:
-        if _local(child.tag) != kind:
+        kind = _local(child.tag)
+        if kind not in results:
             continue
         item = Classification(
             clean_text(child.attrib.get("id", "")), clean_text(_text(child, "name"))
@@ -298,11 +308,11 @@ def _classes(genre: ET.Element | None, kind: str) -> list[Classification]:
         if not item.id and not item.name:
             continue
         identity = (item.id, item.name)
-        if identity in seen:
+        if identity in seen[kind]:
             continue
-        seen.add(identity)
-        result.append(item)
-    return result
+        seen[kind].add(identity)
+        results[kind].append(item)
+    return results["program"], results["personality"]
 
 
 def _parse_document(text: str, root_name: str) -> ET.Element:
@@ -514,8 +524,9 @@ def acquire_stations(
     _schedules(source, span, report, cancelled, progress)
     if cancelled.is_set():
         raise CatalogError("cancelled")
+    by_station = {item.station_id: item for item in report.lists}
     for entry in report.stations:
-        listing = next((item for item in report.lists if item.station_id == entry.station.id), None)
+        listing = by_station.get(entry.station.id)
         if listing is not None:
             entry.station = Station(entry.station.id, listing.station_name)
     return report
