@@ -248,17 +248,20 @@ class LineEditor:
         self.cursor = _snap_points(points, self.cursor)
         raw = self.value.encode()
         index = points.index(self.cursor)
-        inserted = False
+        changed = False
         if key == "ctrl-u":
             self.value = ""
             self.cursor = 0
+            changed = True
         elif key == "backspace":
             start = points[index - 1] if index > 0 else 0
             self.value = (raw[:start] + raw[self.cursor :]).decode()
             self.cursor = start
+            changed = True
         elif key == "delete":
             end = points[index + 1] if index + 1 < len(points) else len(raw)
             self.value = (raw[: self.cursor] + raw[end:]).decode()
+            changed = True
         elif key == "left":
             self.cursor = points[index - 1] if index > 0 else 0
         elif key == "right":
@@ -273,10 +276,10 @@ class LineEditor:
             and not key.isspace()
             or (len(key) == 1 and key not in {"\n", "\t"} and key.isprintable())
         ):
-            inserted = self._insert(key, raw)
-        # 挿入した文字が前のクラスタと結合した場合だけ境界を取り直す。
-        # 削除・移動後は常に既存の境界に乗るため、走査は1回で足りる。
-        if inserted:
+            changed = self._insert(key, raw)
+        # 値が変わると前後のクラスタが融合して境界が消えることがある
+        # （書式文字を消したときなど）。変化したときだけ境界を取り直す。
+        if changed:
             self.cursor = _snap_points(
                 _boundaries(self.value), min(self.cursor, len(self.value.encode()))
             )

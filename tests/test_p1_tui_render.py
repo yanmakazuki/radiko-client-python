@@ -9,7 +9,7 @@ import pytest
 
 from radiko.domain import JST, Filter, Program, ProgramKey
 from radiko.text import _is_zero, cluster_width, display_width, graphemes
-from radiko_client.tui import LineEditor, Screen, truncate_width
+from radiko_client.tui import LineEditor, Screen, _boundaries, truncate_width
 
 SAMPLES = [
     "",
@@ -177,3 +177,18 @@ def test_visible_is_filters_once_and_reuses_until_programs_or_filter_change(monk
     screen.programs = make_programs(5)
     assert len(screen.visible()) == 5
     assert calls["count"] == 100 + 5
+
+
+def test_line_editor_resnaps_after_deleting_a_format_character():
+    # ZWSP を消すと前後の文字が1クラスタに融合し、元のカーソル位置は境界でなくなる。
+    editor = LineEditor("Ａ\u200b\u3099x", 3, 4096)
+    editor.handle("delete")
+    assert editor.value == "Ａ\u3099x"
+    assert editor.cursor == 0
+    assert editor.cursor in _boundaries(editor.value)
+
+    editor = LineEditor("e\u200b\u0301z", 4, 4096)
+    editor.handle("backspace")
+    assert editor.value == "e\u0301z"
+    assert editor.cursor == 0
+    assert editor.cursor in _boundaries(editor.value)
