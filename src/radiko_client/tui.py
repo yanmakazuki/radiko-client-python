@@ -248,6 +248,7 @@ class LineEditor:
         self.cursor = _snap_points(points, self.cursor)
         raw = self.value.encode()
         index = points.index(self.cursor)
+        inserted = False
         if key == "ctrl-u":
             self.value = ""
             self.cursor = 0
@@ -272,20 +273,25 @@ class LineEditor:
             and not key.isspace()
             or (len(key) == 1 and key not in {"\n", "\t"} and key.isprintable())
         ):
-            self._insert(key)
-        # 結合文字の挿入などでクラスタ内部を指した場合も、旧実装と同じ境界へ戻す。
-        self.cursor = _snap_points(
-            _boundaries(self.value), min(self.cursor, len(self.value.encode()))
-        )
+            inserted = self._insert(key, raw)
+        # 挿入した文字が前のクラスタと結合した場合だけ境界を取り直す。
+        # 削除・移動後は常に既存の境界に乗るため、走査は1回で足りる。
+        if inserted:
+            self.cursor = _snap_points(
+                _boundaries(self.value), min(self.cursor, len(self.value.encode()))
+            )
 
-    def _insert(self, char: str) -> None:
-        if len(self.value.encode()) + len(char.encode()) > self.byte_limit:
-            return
+    def _insert(self, char: str, raw: bytes | None = None) -> bool:
+        encoded = char.encode()
+        if raw is None:
+            raw = self.value.encode()
+        if len(raw) + len(encoded) > self.byte_limit:
+            return False
         if self.scalar_limit is not None and len(self.value) >= self.scalar_limit:
-            return
-        raw = self.value.encode()
-        self.value = (raw[: self.cursor] + char.encode() + raw[self.cursor :]).decode()
-        self.cursor += len(char.encode())
+            return False
+        self.value = (raw[: self.cursor] + encoded + raw[self.cursor :]).decode()
+        self.cursor += len(encoded)
+        return True
 
     def view(self, columns: int) -> tuple[str, int]:
         if columns <= 0:
@@ -394,6 +400,8 @@ def _clock(seconds: float) -> str:
 def truncate_width(text: str, width: int) -> str:
     if width <= 0:
         return ""
+    if text.isascii() and text.isprintable():
+        return text if len(text) <= width else text[:width]
     kept: list[str] = []
     used = 0
     for cluster in graphemes(text):
@@ -494,6 +502,9 @@ class Screen:
     job_box: object | None = None
     job_thread: object | None = None
     play_commands: object | None = None
+    _visible_rows: list[Program] | None = field(default=None, repr=False, compare=False)
+    _visible_programs: list[Program] | None = field(default=None, repr=False, compare=False)
+    _visible_filter: Filter | None = field(default=None, repr=False, compare=False)
 
     def _quit(self) -> None:
         self.quit = True
@@ -507,7 +518,23 @@ class Screen:
         return self.criteria
 
     def visible(self) -> list[Program]:
-        return [program for program in self.programs if self.committed.matches(program)]
+        """絞り込み済みの一覧。`programs` と `committed` が差し替わるまで再利用する。
+
+        `render()` は毎フレーム `visible()` を呼ぶため、5,000枠でも走査は
+        絞り込み条件が変わった1回だけになる。返すリストは読み取り専用として扱う。
+        """
+        rows = self._visible_rows
+        if (
+            rows is not None
+            and self._visible_programs is self.programs
+            and self._visible_filter is self.committed
+        ):
+            return rows
+        rows = [program for program in self.programs if self.committed.matches(program)]
+        self._visible_programs = self.programs
+        self._visible_filter = self.committed
+        self._visible_rows = rows
+        return rows
 
     def handle(self, key: str) -> None:
         self.clock += 0.05

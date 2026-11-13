@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 
 import regex
+
+_GRAPHEME_RE = regex.compile(r"\X")
 
 _ZERO_WIDTH = {
     "Mn",
@@ -33,29 +36,38 @@ def graphemes(text: str) -> list[str]:
     """拡張書記素クラスタ。`regex` の `\\X` は UAX #29 である。"""
     if text == "":
         return []
-    return regex.findall(r"\X", text)
+    return _GRAPHEME_RE.findall(text)
 
 
 def display_width(text: str) -> int:
     """制御文字は 0、全角と全幅は 2、それ以外の可視クラスタは 1。曖昧幅は 1。"""
+    if text.isascii() and text.isprintable():
+        return len(text)
     width = 0
     for cluster in graphemes(text):
         width += cluster_width(cluster)
     return width
 
 
+@functools.lru_cache(maxsize=4096)
 def cluster_width(cluster: str) -> int:
+    """1クラスタの表示幅。同じクラスタはフレームを跨いで再利用する。"""
     if cluster == "":
         return 0
-    if all(_is_zero(char) for char in cluster):
-        return 0
+    if len(cluster) == 1:
+        code = ord(cluster)
+        if 0x20 <= code < 0x7F:
+            return 1
     wide = False
+    visible = False
     for char in cluster:
         if _is_zero(char):
             continue
-        east = unicodedata.east_asian_width(char)
-        if east in {"W", "F"}:
+        visible = True
+        if unicodedata.east_asian_width(char) in {"W", "F"}:
             wide = True
+    if not visible:
+        return 0
     return 2 if wide else 1
 
 
