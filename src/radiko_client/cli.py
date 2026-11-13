@@ -572,7 +572,7 @@ def _acquire(request: ProgramRequest, now: datetime) -> None:
         raise RuntimeError("取得結果に欠落があります。同じコマンドの再実行で全件を再取得できます")
 
 
-def _snapshot(listing: ProgramList, now: datetime, criteria_filter: Filter) -> dict:
+def _snapshot(listing: ProgramList, now: datetime, criteria_filter: Filter, observed=None) -> dict:
     programs = []
     for program in listing.programs:
         if not criteria_filter.matches(program):
@@ -600,7 +600,8 @@ def _snapshot(listing: ProgramList, now: datetime, criteria_filter: Filter) -> d
                 "title": program.title,
             }
         )
-    observed = ObservedClassifications.collect(listing.programs)
+    if observed is None:
+        observed = ObservedClassifications.collect(listing.programs)
     return {
         "as_of": rfc3339(now),
         "broadcast_day": listing.broadcast_day.isoformat(),
@@ -632,7 +633,12 @@ def _observed(observed: ObservedClassifications) -> dict:
 
 
 def _report_snapshot(report, request: ProgramRequest, now: datetime) -> dict:
-    schedules = [_snapshot(item, now, request.filter) for item in report.lists]
+    observed = []
+    schedules = []
+    for item in report.lists:
+        one = ObservedClassifications.collect(item.programs)
+        observed.append(one)
+        schedules.append(_snapshot(item, now, request.filter, one))
     return {
         "area_failures": [
             {"broadcast_day": None, "reason": str(item.error), "target": item.target}
@@ -649,11 +655,7 @@ def _report_snapshot(report, request: ProgramRequest, now: datetime) -> dict:
         },
         "filters": request.filter.to_dict(),
         "matched_program_count": sum(item["matched_program_count"] for item in schedules),
-        "observed_classifications": _observed(
-            ObservedClassifications.collect(
-                [program for item in report.lists for program in item.programs]
-            )
-        ),
+        "observed_classifications": _observed(ObservedClassifications.merge(observed)),
         "requested_schedules": len(report.stations) * len(request.range.days),
         "schedule_failures": [
             {
@@ -676,24 +678,31 @@ def _report_snapshot(report, request: ProgramRequest, now: datetime) -> dict:
 
 
 def _print_list(listing: ProgramList, now: datetime, criteria_filter: Filter) -> None:
-    value = _snapshot(listing, now, criteria_filter)
     stdout_ln(
         f"{listing.station_name} ({listing.station_id}) / 放送日 {listing.broadcast_day} / 日本時間（実行時点の状態）"
     )
-    for item in value["programs"]:
-        stdout_ln(f"{item['starts_at']}–{item['ends_at']} [{item['status_label']}] {item['title']}")
+    matched = 0
+    for program in listing.programs:
+        if not criteria_filter.matches(program):
+            continue
+        matched += 1
+        status = broadcast_status(program.key.starts_at, program.ends_at, now)
         stdout_ln(
-            f"  出演: {item['performer']} / 番組ジャンル: {_labels(item['program_genres'])} / "
-            f"出演者分類: {_labels(item['personality_genres'])}"
+            f"{rfc3339(program.key.starts_at)}–{rfc3339(program.ends_at)} "
+            f"[{STATUS_LABEL[status]}] {program.title}"
+        )
+        stdout_ln(
+            f"  出演: {program.performer} / 番組ジャンル: {_labels(program.program_genres)} / "
+            f"出演者分類: {_labels(program.personality_genres)}"
         )
     stdout_ln(
-        f"一致{value['matched_program_count']}件 / 取得{len(listing.programs)}件 / "
+        f"一致{matched}件 / 取得{len(listing.programs)}件 / "
         f"不正・日付不一致: {listing.invalid_count}件 / 重複: {listing.duplicate_count}件 / 全件: 再生可否未確認"
     )
 
 
-def _labels(items: list[dict]) -> str:
-    names = [item["name"] or item["id"] for item in items]
+def _labels(items) -> str:
+    names = [item.name or item.id for item in items]
     names = [name for name in names if name]
     return "未分類" if not names else "、".join(names)
 
