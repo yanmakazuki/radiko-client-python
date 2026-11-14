@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import sys
 import threading
 import time
@@ -16,6 +15,7 @@ import unicodedata
 import numpy as np
 
 from radiko.audio import OutputError, OutputInfo, OutputSummary
+from radiko.dynamic_library import find_library, open_library
 
 LINEAR_PCM = 0x6C70636D
 FLOAT_PACKED = 1 | 8
@@ -77,38 +77,16 @@ class AudioStreamRangedDescription(ctypes.Structure):
 
 _OUTPUT_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _callbacks: list = []
-# 解決済みのパスごとに CDLL と署名を一度だけ用意する。find_library を差し替えた
-# テストでは解決関数が変わるので、そのときだけ引き直す。
-_library_paths: dict[str, tuple[object, str | None]] = {}
-_libraries: dict[str, object] = {}
-
-
-def _find(name: str):
-    finder = ctypes.util.find_library
-    cached = _library_paths.get(name)
-    if cached is not None and cached[0] is finder:
-        return cached[1]
-    path = finder(name)
-    _library_paths[name] = (finder, path)
-    return path
-
-
-def _open_library(path: str):
-    loaded = _libraries.get(path)
-    if loaded is None:
-        loaded = ctypes.CDLL(path)
-        _libraries[path] = loaded
-    return loaded
 
 
 def library():
     """darwin で AudioToolbox が見つかったときだけ返す。"""
     if sys.platform != "darwin":
         return None
-    path = _find("AudioToolbox")
+    path = find_library("AudioToolbox")
     if not path:
         return None
-    loaded = _open_library(path)
+    loaded = open_library(path)
     _bind(loaded)
     return loaded
 
@@ -367,10 +345,10 @@ def _default_output():
 
 
 def _load(name: str):
-    path = _find(name)
+    path = find_library(name)
     if not path:
         return None
-    return _open_library(path)
+    return open_library(path)
 
 
 def _address(selector: int, scope: int = SCOPE_GLOBAL, element: int = 0):

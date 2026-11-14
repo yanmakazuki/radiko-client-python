@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import os
 import sys
 import threading
@@ -20,6 +19,7 @@ import numpy as np
 
 from radiko import coreaudio
 from radiko.audio import OutputCapability, OutputError, OutputInfo, OutputSummary
+from radiko.dynamic_library import find_library, open_library
 
 PCM_RATE_MIN = 8000
 PCM_RATE_MAX = 192000
@@ -300,35 +300,11 @@ def _remix(block, src: int, dst: int, frames: int) -> np.ndarray:
 
 
 def _alsa():
-    path = _find("asound")
+    path = find_library("asound")
     if not path:
         return None
-    library = _open_library(path)
+    library = open_library(path)
     _bind_alsa(library)
-    return library
-
-
-# 解決済みのパスごとに CDLL と署名を一度だけ用意する。find_library を差し替えた
-# テストでは解決関数が変わるので、そのときだけ引き直す。
-_library_paths: dict[str, tuple[object, str | None]] = {}
-_libraries: dict[str, object] = {}
-
-
-def _find(name: str):
-    finder = ctypes.util.find_library
-    cached = _library_paths.get(name)
-    if cached is not None and cached[0] is finder:
-        return cached[1]
-    path = finder(name)
-    _library_paths[name] = (finder, path)
-    return path
-
-
-def _open_library(path: str):
-    library = _libraries.get(path)
-    if library is None:
-        library = ctypes.CDLL(path)
-        _libraries[path] = library
     return library
 
 
