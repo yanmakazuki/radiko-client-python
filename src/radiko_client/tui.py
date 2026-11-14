@@ -13,6 +13,7 @@ import threading
 import time
 import tty
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.resources import files
@@ -39,7 +40,7 @@ from radiko.domain import (
     broadcast_status,
 )
 from radiko.http_client import catalog_fetch
-from radiko.output import OutputError, diagnose_default_output
+from radiko.output import OutputCapability, OutputError, diagnose_default_output
 from radiko.prepare import inspect_remote_chapters, play_station
 from radiko.storage import SearchStore, SessionStore, default_data_dir
 from radiko.stream import validate_station
@@ -458,10 +459,10 @@ class Screen:
     device_text: str = ""
     device_status: str = "idle"
     device_generation: int = 0
-    device_report: object | None = None
+    device_report: OutputCapability | None = None
     device_error: str = ""
-    device_box: object | None = None
-    device_probe: object | None = None
+    device_box: queue.Queue | None = None
+    device_probe: Callable[[int], OutputCapability] | None = None
     station_id: str = "TBS"
     fetch_programs: bool = False
     area_failures: list[tuple[str, str]] = field(default_factory=list)
@@ -493,7 +494,7 @@ class Screen:
     auth_refresh: bool = False
     auth_start: bool = False
     auth_generation: int = 0
-    auth_box: object | None = None
+    auth_box: queue.Queue | None = None
     data_dir: Path | None = None
     criteria: SearchCriteria | None = None
     chapter_summaries: list[str] = field(default_factory=list)
@@ -501,10 +502,10 @@ class Screen:
     chapter_scroll: int = 0
     filter_form: FilterForm | None = None
     job_generation: int = 0
-    job_cancel: object | None = None
-    job_box: object | None = None
-    job_thread: object | None = None
-    play_commands: object | None = None
+    job_cancel: threading.Event | None = None
+    job_box: queue.Queue | None = None
+    job_thread: threading.Thread | None = None
+    play_commands: queue.Queue | None = None
     _visible_rows: list[Program] | None = field(default=None, repr=False, compare=False)
     _visible_programs: list[Program] | None = field(default=None, repr=False, compare=False)
     _visible_filter: Filter | None = field(default=None, repr=False, compare=False)
@@ -675,9 +676,9 @@ class Screen:
 
     def render(self) -> list[str]:
         if self.area == "help":
-            rows = self._overlay(help_text())
-            rows[-1] = truncate_width("q/Esc閉じる", self.width)
-            return rows
+            help_rows = self._overlay(help_text())
+            help_rows[-1] = truncate_width("q/Esc閉じる", self.width)
+            return help_rows
         if self.area == "device":
             return self._framed("出力機器", self._device_body())
         if self.area == "failures":
@@ -1759,6 +1760,7 @@ def _start_job(screen: Screen, kind: str, payload) -> None:
 
     def work() -> None:
         try:
+            result: tuple[str, object]
             if kind == "fetch":
                 result = ("fetch", _fetch_programs(payload, cancel))
             elif kind == "chapters":
