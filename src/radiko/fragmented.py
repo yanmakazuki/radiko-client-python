@@ -93,6 +93,90 @@ def _take(data, at: int) -> tuple[int, int]:
     return _word(data, at), at + 4
 
 
+def _parse_tfhd(
+    traf: list[_Atom], track: int, default_duration: int, default_size: int
+) -> tuple[int, int]:
+    """tfhd を検証し、(既定 duration, 既定 size) を返す。"""
+    tfhd = _one(traf, b"tfhd").data
+    flags = _word(tfhd, 0)
+    if flags & ~0x2003A or flags & 0x20000 == 0 or _word(tfhd, 4) != track:
+        raise AacError("unsupported-container")
+    at = 8
+    if flags & 2:
+        selector, at = _take(tfhd, at)
+        if selector != 1:
+            raise AacError("unsupported-container")
+    if flags & 8:
+        default_duration, at = _take(tfhd, at)
+    if flags & 16:
+        default_size, at = _take(tfhd, at)
+    if flags & 32:
+        _, at = _take(tfhd, at)
+    if at != len(tfhd):
+        raise AacError("container")
+    return default_duration, default_size
+
+
+def _parse_tfdt(tfdt) -> int:
+    """tfdt から decode time を返す。version 0 と 1 だけを許す。"""
+    version = _word(tfdt, 0)
+    if version == 0 and len(tfdt) == 8:
+        return _word(tfdt, 4)
+    if version == 0x01000000 and len(tfdt) == 12:
+        return (_word(tfdt, 4) << 32) | _word(tfdt, 8)
+    raise AacError("container")
+
+
+def _parse_trun(
+    trun, mdat: _Atom, moof: _Atom, default_duration: int, default_size: int, cancelled
+) -> tuple[list[memoryview], int]:
+    """trun の sample 表を検証し、mdat から packet を切り出して (packets, duration) を返す。"""
+    flags = _word(trun, 0)
+    if flags & ~0x705 or flags & 1 == 0 or flags & 0x404 == 0x404:
+        raise AacError("unsupported-container")
+    count = _word(trun, 4)
+    if count == 0:
+        raise AacError("empty")
+    if count > 512:
+        raise AacError("many")
+    offset = _word(trun, 8)
+    if offset >= 0x80000000:
+        offset = offset - 0x100000000
+    if offset < 0 or moof.offset + offset != mdat.offset + mdat.header:
+        raise AacError("container")
+    cursor_at = 12
+    if flags & 4:
+        _, cursor_at = _take(trun, cursor_at)
+    packets: list[memoryview] = []
+    duration = 0
+    cursor = 0
+    for _ in range(count):
+        if cancelled():
+            raise AacError("cancelled")
+        if flags & 0x100:
+            dur, cursor_at = _take(trun, cursor_at)
+        else:
+            dur = default_duration
+        if flags & 0x200:
+            size, cursor_at = _take(trun, cursor_at)
+        else:
+            size = default_size
+        if flags & 0x400:
+            _, cursor_at = _take(trun, cursor_at)
+        if dur == 0 or size == 0:
+            raise AacError("container")
+        duration += dur
+        end = cursor + size
+        piece = mdat.data[cursor:end]
+        if len(piece) != size:
+            raise AacError("container")
+        packets.append(piece)
+        cursor = end
+    if cursor_at != len(trun) or cursor != len(mdat.data):
+        raise AacError("container")
+    return packets, duration
+
+
 def _asc_config(asc) -> tuple[int, int]:
     if len(asc) < 2:
         raise AacError("config")
@@ -258,81 +342,15 @@ class FragmentedAacDecoder:
         traf = _atoms(_one(children, b"traf").data)
         if len(traf) != 3:
             raise AacError("unsupported-container")
-        tfhd = _one(traf, b"tfhd").data
-        flags = _word(tfhd, 0)
-        if flags & ~0x2003A or flags & 0x20000 == 0 or _word(tfhd, 4) != self.track:
-            raise AacError("unsupported-container")
-        at = 8
-        if flags & 2:
-            selector, at = _take(tfhd, at)
-            if selector != 1:
-                raise AacError("unsupported-container")
-        if flags & 8:
-            default_duration, at = _take(tfhd, at)
-        else:
-            default_duration = self.default_duration
-        if flags & 16:
-            default_size, at = _take(tfhd, at)
-        else:
-            default_size = self.default_size
-        if flags & 32:
-            _, at = _take(tfhd, at)
-        if at != len(tfhd):
-            raise AacError("container")
-        tfdt = _one(traf, b"tfdt").data
-        version = _word(tfdt, 0)
-        if version == 0 and len(tfdt) == 8:
-            decode_time = _word(tfdt, 4)
-        elif version == 0x01000000 and len(tfdt) == 12:
-            decode_time = (_word(tfdt, 4) << 32) | _word(tfdt, 8)
-        else:
-            raise AacError("container")
+        default_duration, default_size = _parse_tfhd(
+            traf, self.track, self.default_duration, self.default_size
+        )
+        decode_time = _parse_tfdt(_one(traf, b"tfdt").data)
         if self.next_time is not None and self.next_time != decode_time:
             raise AacError("container")
-        trun = _one(traf, b"trun").data
-        flags = _word(trun, 0)
-        if flags & ~0x705 or flags & 1 == 0 or flags & 0x404 == 0x404:
-            raise AacError("unsupported-container")
-        count = _word(trun, 4)
-        if count == 0:
-            raise AacError("empty")
-        if count > 512:
-            raise AacError("many")
-        offset = _word(trun, 8)
-        if offset >= 0x80000000:
-            offset = offset - 0x100000000
-        if offset < 0 or moof.offset + offset != mdat.offset + mdat.header:
-            raise AacError("container")
-        cursor_at = 12
-        if flags & 4:
-            _, cursor_at = _take(trun, cursor_at)
-        packets = []
-        duration = 0
-        cursor = 0
-        for _ in range(count):
-            if cancelled():
-                raise AacError("cancelled")
-            if flags & 0x100:
-                dur, cursor_at = _take(trun, cursor_at)
-            else:
-                dur = default_duration
-            if flags & 0x200:
-                size, cursor_at = _take(trun, cursor_at)
-            else:
-                size = default_size
-            if flags & 0x400:
-                _, cursor_at = _take(trun, cursor_at)
-            if dur == 0 or size == 0:
-                raise AacError("container")
-            duration += dur
-            end = cursor + size
-            piece = mdat.data[cursor:end]
-            if len(piece) != size:
-                raise AacError("container")
-            packets.append(piece)
-            cursor = end
-        if cursor_at != len(trun) or cursor != len(mdat.data):
-            raise AacError("container")
+        packets, duration = _parse_trun(
+            _one(traf, b"trun").data, mdat, moof, default_duration, default_size, cancelled
+        )
         next_time = decode_time + duration
         if next_time > 0xFFFFFFFFFFFFFFFF:
             raise AacError("container")
