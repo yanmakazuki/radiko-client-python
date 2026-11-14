@@ -1799,6 +1799,17 @@ def _start_job(screen: Screen, kind: str, payload) -> None:
     thread.start()
 
 
+def _is_cancelled_error(error: object) -> bool:
+    """ProbeError の at ラップをたどり、根が cancelled なら True。"""
+    seen = 0
+    while error is not None and seen < 8:
+        if getattr(error, "code", None) == "cancelled":
+            return True
+        error = getattr(error, "inner", None)
+        seen += 1
+    return False
+
+
 def poll_jobs(screen: Screen) -> None:
     box = screen.job_box
     if box is None:
@@ -1813,7 +1824,7 @@ def poll_jobs(screen: Screen) -> None:
     screen.play_commands = None
     screen.revision += 1
     if error is not None:
-        if getattr(error, "code", None) == "cancelled":
+        if _is_cancelled_error(error):
             return
         screen._set_notice(NoticeLevel.ERROR, str(error), True)
         return
