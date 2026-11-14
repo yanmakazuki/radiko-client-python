@@ -471,6 +471,103 @@ def _fetch_sample_blob(media, playlist_url: str, headers, cancelled) -> tuple[by
     return sample, segment
 
 
+@dataclass
+class _DecodedSample:
+    """probe 用サンプルの復号結果。ProbeReport の対応するフィールドへ渡す。"""
+
+    container: str
+    packets: int
+    frames: int
+    rate: int
+    channels: int
+    core_rate: int
+    core_channels: int
+    sbr: bool
+    stereo: bool
+    media_duration: float
+    decode_duration: float
+    nonzero: int
+    decode_error: str | None
+    samples: np.ndarray | None
+
+
+def _decode_sample(
+    blob: bytes, sample: bytes, container: str, codec, retain: bool, cancelled
+) -> _DecodedSample:
+    """サンプルをコンテナ判定して復号し、ProbeReport 用の値を返す。"""
+    packets = frames = rate = channels = core_rate = core_channels = 0
+    sbr = stereo = False
+    media_duration = decode_duration = 0.0
+    nonzero = 0
+    decode_error = None
+    samples = None
+    offset = id3_offset(blob)
+    adts = (
+        offset is not None
+        and len(blob) - offset >= 2
+        and blob[offset] == 0xFF
+        and (blob[offset + 1] & 0xF0) == 0xF0
+    )
+    if container == "encrypted":
+        decode_error = None
+    elif container.startswith("ISO BMFF") and sample:
+        started = time.perf_counter()
+        try:
+            core = FragmentedAacDecoder(sample)
+            decoded = core.decode_pcm(blob[len(sample) :], cancelled, codec)
+            packets = decoded.packets
+            frames = decoded.frames
+            rate = decoded.sample_rate
+            channels = decoded.channels
+            core_rate = core.sample_rate
+            core_channels = core.channels
+            sbr = rate > core_rate
+            stereo = core_channels == 1 and channels == 2
+            media_duration = frames / rate
+            decode_duration = time.perf_counter() - started
+            nonzero = int(np.count_nonzero(decoded.samples))
+            samples = decoded.samples if retain else None
+        except AacError as error:
+            decode_error = str(error)
+    elif adts:
+        try:
+            pcm = AdtsDecoder().decode_segment_pcm(blob, codec, cancelled or (lambda: False))
+            packets = pcm.summary.packets
+            frames = pcm.summary.frames
+            rate = pcm.summary.sample_rate
+            channels = pcm.summary.channels
+            core_rate = pcm.summary.core_sample_rate
+            core_channels = pcm.summary.core_channels
+            sbr = pcm.summary.sbr_detected
+            stereo = pcm.summary.stereo_expansion
+            media_duration = pcm.summary.media_duration
+            decode_duration = pcm.summary.decode_duration
+            nonzero = pcm.summary.nonzero_samples
+            samples = pcm.samples if retain else None
+        except AacError as error:
+            decode_error = str(error)
+    elif codec and any(
+        part.strip() in {"mp4a.40.5", "mp4a.40.29"} for part in (codec or "").split(",")
+    ):
+        decode_error = "HE-AAC宣言に対応するコンテナまたは設定情報を確認できません（AACコアだけの成功とは扱いません）"
+    return _DecodedSample(
+        container,
+        packets,
+        frames,
+        rate,
+        channels,
+        core_rate,
+        core_channels,
+        sbr,
+        stereo,
+        media_duration,
+        decode_duration,
+        nonzero,
+        decode_error,
+        samples,
+    )
+
+
 def _sample(
     media, playlist_url: str, headers, codec, retain: bool, cancelled, encrypted: bool = False
 ) -> ProbeReport:
