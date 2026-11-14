@@ -30,6 +30,7 @@ radiko-client --help
 ```sh
 ruff format --check src tests
 ruff check src tests
+python -m mypy src
 pytest
 ```
 
