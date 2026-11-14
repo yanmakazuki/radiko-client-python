@@ -93,6 +93,40 @@ def _take(data, at: int) -> tuple[int, int]:
     return _word(data, at), at + 4
 
 
+def _parse_tfhd(
+    traf: list[_Atom], track: int, default_duration: int, default_size: int
+) -> tuple[int, int]:
+    """tfhd を検証し、(既定 duration, 既定 size) を返す。"""
+    tfhd = _one(traf, b"tfhd").data
+    flags = _word(tfhd, 0)
+    if flags & ~0x2003A or flags & 0x20000 == 0 or _word(tfhd, 4) != track:
+        raise AacError("unsupported-container")
+    at = 8
+    if flags & 2:
+        selector, at = _take(tfhd, at)
+        if selector != 1:
+            raise AacError("unsupported-container")
+    if flags & 8:
+        default_duration, at = _take(tfhd, at)
+    if flags & 16:
+        default_size, at = _take(tfhd, at)
+    if flags & 32:
+        _, at = _take(tfhd, at)
+    if at != len(tfhd):
+        raise AacError("container")
+    return default_duration, default_size
+
+
+def _parse_tfdt(tfdt) -> int:
+    """tfdt から decode time を返す。version 0 と 1 だけを許す。"""
+    version = _word(tfdt, 0)
+    if version == 0 and len(tfdt) == 8:
+        return _word(tfdt, 4)
+    if version == 0x01000000 and len(tfdt) == 12:
+        return (_word(tfdt, 4) << 32) | _word(tfdt, 8)
+    raise AacError("container")
+
+
 def _asc_config(asc) -> tuple[int, int]:
     if len(asc) < 2:
         raise AacError("config")
