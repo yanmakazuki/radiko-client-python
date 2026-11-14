@@ -443,6 +443,34 @@ def _join(base: str, uri: str) -> str:
     return urljoin(base, uri)
 
 
+def _fetch_sample_blob(media, playlist_url: str, headers, cancelled) -> tuple[bytes, bytes]:
+    """先頭セグメントと、あれば初期化セグメントを取得する。"""
+    first = media.segments[0]
+    sample = b""
+    if first.map_uri:
+        sample = stream_get(
+            _join(playlist_url, first.map_uri),
+            {},
+            limit=TEXT_LIMIT,
+            cancelled=cancelled,
+            redirects=True,
+            readonly_retry=True,
+        ).body
+        if not sample:
+            raise ProbeError("playlist")
+    segment = stream_get(
+        _join(playlist_url, first.uri),
+        {},
+        limit=SAMPLE_LIMIT,
+        cancelled=cancelled,
+        redirects=True,
+        readonly_retry=True,
+    ).body
+    if not segment:
+        raise ProbeError("playlist")
+    return sample, segment
+
+
 def _sample(
     media, playlist_url: str, headers, codec, retain: bool, cancelled, encrypted: bool = False
 ) -> ProbeReport:
