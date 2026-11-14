@@ -49,6 +49,11 @@ def broadcast_day(now: datetime) -> date:
 
 
 class BroadcastStatus:
+    """放送前・放送中・放送終了の3値。
+
+    `broadcast_status` が now と開始・終了時刻を比べて決める。放送日は JST 05:00 で切り替わる。
+    """
+
     UPCOMING = "upcoming"
     ON_AIR = "on_air"
     FINISHED = "finished"
@@ -62,6 +67,11 @@ STATUS_LABEL = {
 
 
 def broadcast_status(start: datetime, end: datetime, now: datetime) -> str:
+    """now が開始前・放送中・終了後のどれかを返す。
+
+    終了が開始以前なら ValueError。放送日の境界（JST 05:00）はこの関数では扱わず、
+    `broadcast_day` を使うのは呼び出し側。
+    """
     if end <= start:
         raise ValueError("放送終了日時が開始日時以前です")
     if now < start:
@@ -72,27 +82,39 @@ def broadcast_status(start: datetime, end: datetime, now: datetime) -> str:
 
 
 class ListeningAvailability:
+    """再生可否の観測値。実際に再生を試した結果だけを表す。
+
+    CURRENT は「現在の再生で確認済み」で、局や条件を変えた再操作では再確認する。
+    """
+
     UNKNOWN = "再生可否未確認"
     CURRENT = "現在の再生で配信確認済み（再操作時は再確認）"
 
 
 @dataclass(frozen=True)
 class ProgramKey:
+    """局IDと開始時刻で番組を一意にするキー。番組表・保存・TUI の選択が共有する。"""
+
     station_id: str
     starts_at: datetime
 
     def __hash__(self) -> int:
+        """局IDと開始時刻の組でハッシュする。"""
         return hash((self.station_id, self.starts_at))
 
 
 @dataclass(frozen=True)
 class Classification:
+    """番組や出演者の分類。radiko の genre id と表示名の組。"""
+
     id: str
     name: str
 
 
 @dataclass
 class Program:
+    """番組表の1番組。catalog が作り、CLI と TUI が読む。"""
+
     key: ProgramKey
     program_id: str
     ends_at: datetime
@@ -117,22 +139,28 @@ class Program:
 
 @dataclass(frozen=True)
 class Station:
+    """放送局。保存と検索条件は局IDだけを使い、名前は表示用。"""
+
     id: str
     name: str
 
 
 @dataclass
 class BroadcastRange:
+    """検索対象の放送日範囲。開始・終了と、列挙済みの days を持つ。"""
+
     start: date
     end: date
     days: list[date]
 
     @classmethod
     def single(cls, day: date) -> BroadcastRange:
+        """1放送日だけの範囲を作る。"""
         return cls(day, day, [day])
 
     @classmethod
     def new(cls, start: date, end: date) -> BroadcastRange:
+        """開始日から終了日までを列挙する。1〜30日以外は ValueError。"""
         span = (end - start).days
         if not 0 <= span < 30:
             raise ValueError("期間は開始日から終了日までの1〜30放送日で指定してください")
@@ -148,6 +176,8 @@ class BroadcastRange:
 
 @dataclass
 class Chapter:
+    """チャプター1件。開始・終了は番組先頭からの秒で、source_index は元の並び。"""
+
     title: str
     summary: str
     start: float
@@ -157,6 +187,8 @@ class Chapter:
 
 @dataclass
 class ChapterSet:
+    """チャプターの集合。不正件数と音楽件数を添えて画面へ渡す。"""
+
     chapters: list[Chapter]
     invalid_count: int
     music_count: int
@@ -175,6 +207,7 @@ class ChapterSet:
 
 
 def _ids(values: list[str]) -> list[str]:
+    """分類IDを検証し、strip・重複除去・ソートして返す。"""
     if any(item.strip() == "" or len(item.encode()) > 128 or has_control(item) for item in values):
         raise ValueError("分類IDは空でない128バイト以内の値で指定してください")
     return sorted({item.strip() for item in values})
@@ -182,6 +215,11 @@ def _ids(values: list[str]) -> list[str]:
 
 @dataclass
 class Filter:
+    """検索条件。番組・出演者の分類ID、未分類の可否、キーワードを持つ。
+
+    `matches` は指定した軸のすべてを AND で評価する。
+    """
+
     program_genres: list[str] = field(default_factory=list)
     personality_genres: list[str] = field(default_factory=list)
     unclassified_program: bool = False
@@ -194,6 +232,7 @@ class Filter:
     )
 
     def __post_init__(self) -> None:
+        """分類IDの集合と、キーワードの小文字版を前計算する。"""
         self.program_genre_set = frozenset(self.program_genres)
         self.personality_genre_set = frozenset(self.personality_genres)
         if self.keyword is not None and self.keyword_lowercase is None:
@@ -208,6 +247,12 @@ class Filter:
         unclassified_personality: bool = False,
         keyword: str | None = None,
     ) -> Filter:
+        """分類IDとキーワードを検証して正規化した Filter を作る。
+
+        分類IDの各要素は空文字・128バイト超・制御文字で ValueError（空リストは有効）。
+        キーワードは空文字・1024バイト超・制御文字で ValueError。作った条件は `matches`
+        が軸間 AND・同一軸内 OR で評価する。
+        """
         keyword_text = None if keyword is None else keyword.strip()
         if keyword_text is not None and (
             keyword_text == "" or len(keyword_text.encode()) > 1024 or has_control(keyword_text)
@@ -224,6 +269,7 @@ class Filter:
         return result
 
     def with_keyword(self, keyword: str | None) -> Filter:
+        """同じ分類条件のまま、キーワードだけ差し替えた Filter を返す。"""
         return Filter.create(
             self.program_genres,
             self.personality_genres,
@@ -233,6 +279,11 @@ class Filter:
         )
 
     def matches(self, program: Program) -> bool:
+        """番組が条件に一致するかを返す。軸間は AND、同一軸内は OR。
+
+        分類IDが空で未分類を許さない軸は全件に一致する。未分類を許す軸は、IDが
+        空なら分類なしだけ、IDがあればそのいずれか（OR）か分類なしに一致する。
+        """
         return (
             _matches_class(
                 program.program_genres, self.program_genre_set, self.unclassified_program
@@ -246,6 +297,9 @@ class Filter:
         )
 
     def to_dict(self) -> dict:
+        """保存用の辞書にする。キーは program_genres / personality_genres /
+        unclassified_program / unclassified_personality / keyword。
+        """
         return {
             "program_genres": list(self.program_genres),
             "personality_genres": list(self.personality_genres),
@@ -256,6 +310,10 @@ class Filter:
 
     @classmethod
     def from_dict(cls, value: dict) -> Filter:
+        """保存用の辞書から復元する。
+
+        未知キーは ValueError("unknown")、必須キー欠落は KeyError、型違反は ValueError("invalid")。
+        """
         _reject_unknown(
             value,
             {
@@ -291,6 +349,11 @@ class Filter:
 
 
 def _matches_class(items: list[Classification], ids: frozenset[str], empty: bool) -> bool:
+    """1つの分類軸の一致判定。
+
+    ID指定が空なら、未分類を許さない軸は全件、許す軸は分類なしだけに一致する。
+    IDがあれば、そのいずれか（OR）か、未分類可なら分類なしにも一致する。
+    """
     if not ids and not empty:
         return True
     if empty and not items:
@@ -300,6 +363,11 @@ def _matches_class(items: list[Classification], ids: frozenset[str], empty: bool
 
 @dataclass(frozen=True)
 class ObservedClassifications:
+    """取得した番組から観測した分類と、分類なしの件数。
+
+    CLI の --classifications 表示と、TUI の分類フィルタ選択肢に使う。
+    """
+
     program_genres: list[Classification]
     personality_genres: list[Classification]
     unclassified_programs: int
@@ -307,6 +375,7 @@ class ObservedClassifications:
 
     @classmethod
     def collect(cls, programs: list[Program]) -> ObservedClassifications:
+        """番組一覧を走査し、分類の和集合と未分類の件数を数える。"""
         genres: set[tuple[str, str]] = set()
         personalities: set[tuple[str, str]] = set()
         unclassified_programs = 0
@@ -346,6 +415,8 @@ class ObservedClassifications:
 
 
 class ScopeKind:
+    """検索範囲の種類。全国・1局・複数エリアの3つ。"""
+
     NATIONWIDE = "nationwide"
     STATION = "station"
     AREAS = "areas"
@@ -353,28 +424,35 @@ class ScopeKind:
 
 @dataclass
 class Scope:
+    """検索範囲。全国は value なし、局は局ID、エリアは地域IDの並びを持つ。"""
+
     kind: str
     value: str | list[str] | None = None
 
     @classmethod
     def nationwide(cls) -> Scope:
+        """全国を対象にする。"""
         return cls(ScopeKind.NATIONWIDE)
 
     @classmethod
     def station(cls, station_id: str) -> Scope:
+        """1局を対象にする。"""
         return cls(ScopeKind.STATION, station_id)
 
     @classmethod
     def areas(cls, areas: list[str]) -> Scope:
+        """複数エリアを対象にする。渡した並びはコピーして保持する。"""
         return cls(ScopeKind.AREAS, list(areas))
 
     def to_dict(self) -> dict:
+        """保存用の辞書にする。全国は kind だけ、局・エリアは value も持つ。"""
         if self.kind == ScopeKind.NATIONWIDE:
             return {"kind": "nationwide"}
         return {"kind": self.kind, "value": self.value}
 
 
 def _valid_station(station_id: str) -> bool:
+    """保存できる局IDか。ASCII の大文字・数字・-・_ のみ、32文字以内。"""
     if not station_id or len(station_id) > 32:
         return False
     return all(
@@ -383,17 +461,24 @@ def _valid_station(station_id: str) -> bool:
 
 
 def _valid_area(area: str) -> bool:
+    """VALID_AREAS に含まれる地域IDか。"""
     return area in VALID_AREAS
 
 
 @dataclass
 class SearchCriteria:
+    """検索条件の一式。範囲・放送日・フィルタをまとめ、保存と起動時復元に使う。"""
+
     scope: Scope
     range: BroadcastRange
     filter: Filter
 
     @classmethod
     def create(cls, scope: Scope, span: BroadcastRange, criteria_filter: Filter) -> SearchCriteria:
+        """範囲・放送日・フィルタを検証して作る。
+
+        局IDや地域IDが不正なら ValueError。エリアは重複を除いてソートする。
+        """
         if scope.kind == ScopeKind.STATION:
             if not isinstance(scope.value, str) or not _valid_station(scope.value):
                 raise ValueError("保存する局IDが不正です")
@@ -408,6 +493,7 @@ class SearchCriteria:
 
     @classmethod
     def initial(cls, now: datetime) -> SearchCriteria:
+        """起動時の既定条件。全国・当日1日・空のフィルタ。"""
         return cls.create(
             Scope.nationwide(), BroadcastRange.single(broadcast_day(now)), Filter.create()
         )
@@ -421,6 +507,7 @@ class SearchCriteria:
         )
 
     def to_file_dict(self) -> dict:
+        """保存用の辞書にする。キーは scope / start / end / filter で、日付は YYYYMMDD。"""
         return {
             "scope": self.scope.to_dict(),
             "start": self.range.start.strftime("%Y%m%d"),
@@ -429,15 +516,22 @@ class SearchCriteria:
         }
 
     def to_snapshot(self) -> dict:
+        """スナップショット用の辞書。現在は保存形と同じ形を返す。"""
         return self.to_file_dict()
 
 
 def _reject_unknown(value: dict, allowed: set[str]) -> None:
+    """allowed にないキーがあれば ValueError にする。"""
     if set(value) - allowed:
         raise ValueError("unknown")
 
 
 def criteria_from_file(value: dict) -> SearchCriteria:
+    """保存用の辞書から SearchCriteria を復元する。
+
+    未知キーは ValueError("unknown")、必須キー欠落は KeyError、start/end などの
+    型不正は TypeError、形・値の不正は ValueError("invalid")。
+    """
     _reject_unknown(value, {"scope", "start", "end", "filter"})
     scope_value = value["scope"]
     if not isinstance(scope_value, dict) or set(scope_value) - {"kind", "value"}:
@@ -466,6 +560,7 @@ def criteria_from_file(value: dict) -> SearchCriteria:
 
 
 def _ymd(text: str) -> date:
+    """YYYYMMDD を date にする。形式・実在しない日付は ValueError。"""
     if len(text) != 8 or not text.isdigit():
         raise ValueError("invalid")
     try:
