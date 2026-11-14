@@ -8,6 +8,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 from radiko.auth import authenticate, partial_key
 from radiko.storage import MemberSession
 from radiko_client.cli import main
@@ -153,6 +155,7 @@ def test_partial_key_and_auth_round_trip_hide_the_token(monkeypatch):
     assert "synthetic-token" not in str(headers)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="ALSA は Linux 専用")
 def test_missing_alsa_device_message_and_optional_library_log(tmp_path):
     config = tmp_path / "asound.conf"
     config.write_text("pcm.!default {\n type hw\n card MissingRadikoCard\n}\n")
