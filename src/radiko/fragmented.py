@@ -127,6 +127,56 @@ def _parse_tfdt(tfdt) -> int:
     raise AacError("container")
 
 
+def _parse_trun(
+    trun, mdat: _Atom, moof: _Atom, default_duration: int, default_size: int, cancelled
+) -> tuple[list[memoryview], int]:
+    """trun の sample 表を検証し、mdat から packet を切り出して (packets, duration) を返す。"""
+    flags = _word(trun, 0)
+    if flags & ~0x705 or flags & 1 == 0 or flags & 0x404 == 0x404:
+        raise AacError("unsupported-container")
+    count = _word(trun, 4)
+    if count == 0:
+        raise AacError("empty")
+    if count > 512:
+        raise AacError("many")
+    offset = _word(trun, 8)
+    if offset >= 0x80000000:
+        offset = offset - 0x100000000
+    if offset < 0 or moof.offset + offset != mdat.offset + mdat.header:
+        raise AacError("container")
+    cursor_at = 12
+    if flags & 4:
+        _, cursor_at = _take(trun, cursor_at)
+    packets: list[memoryview] = []
+    duration = 0
+    cursor = 0
+    for _ in range(count):
+        if cancelled():
+            raise AacError("cancelled")
+        if flags & 0x100:
+            dur, cursor_at = _take(trun, cursor_at)
+        else:
+            dur = default_duration
+        if flags & 0x200:
+            size, cursor_at = _take(trun, cursor_at)
+        else:
+            size = default_size
+        if flags & 0x400:
+            _, cursor_at = _take(trun, cursor_at)
+        if dur == 0 or size == 0:
+            raise AacError("container")
+        duration += dur
+        end = cursor + size
+        piece = mdat.data[cursor:end]
+        if len(piece) != size:
+            raise AacError("container")
+        packets.append(piece)
+        cursor = end
+    if cursor_at != len(trun) or cursor != len(mdat.data):
+        raise AacError("container")
+    return packets, duration
+
+
 def _asc_config(asc) -> tuple[int, int]:
     if len(asc) < 2:
         raise AacError("config")
