@@ -577,6 +577,28 @@ class Screen:
         self._dismiss_for_key(key)
         if self._move_selection(key):
             return
+        self._list_action(key)
+
+    def _move_selection(self, key: str) -> bool:
+        """一覧の選択位置を動かすキーなら処理して True を返す。"""
+        if key in {"j", "down"}:
+            self.selected = min(self.selected + 1, max(len(self.visible()) - 1, 0))
+        elif key in {"k", "up"}:
+            self.selected = max(self.selected - 1, 0)
+        elif key == "home":
+            self.selected = 0
+        elif key == "end":
+            self.selected = max(len(self.visible()) - 1, 0)
+        elif key == "pageup":
+            self.selected = max(self.selected - self._page(), 0)
+        elif key == "pagedown":
+            self.selected = min(self.selected + self._page(), max(len(self.visible()) - 1, 0))
+        else:
+            return False
+        return True
+
+    def _list_action(self, key: str) -> None:
+        """一覧画面の操作キーを処理する。移動系は _move_selection が先に受ける。"""
         if key == "q":
             self._quit()
         elif key == "/":
@@ -645,24 +667,6 @@ class Screen:
             self._enter()
         elif key == "r":
             self._commit_search()
-
-    def _move_selection(self, key: str) -> bool:
-        """一覧の選択位置を動かすキーなら処理して True を返す。"""
-        if key in {"j", "down"}:
-            self.selected = min(self.selected + 1, max(len(self.visible()) - 1, 0))
-        elif key in {"k", "up"}:
-            self.selected = max(self.selected - 1, 0)
-        elif key == "home":
-            self.selected = 0
-        elif key == "end":
-            self.selected = max(len(self.visible()) - 1, 0)
-        elif key == "pageup":
-            self.selected = max(self.selected - self._page(), 0)
-        elif key == "pagedown":
-            self.selected = min(self.selected + self._page(), max(len(self.visible()) - 1, 0))
-        else:
-            return False
-        return True
 
     def keyword_preview(self, rows: list[Program] | None = None) -> str | None:
         if self.area != "keyword":
