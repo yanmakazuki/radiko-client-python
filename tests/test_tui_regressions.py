@@ -261,12 +261,15 @@ def test_filter_keys_send_area_and_dates_and_nationwide_lists_every_area(tmp_pat
         ):
             os.write(master, b"f\t\t\x1b[12~\r\r")
             phase["step"] = 2
-        if (
-            phase["step"] == 2
-            and sum(path.startswith("/v3/station/list/JP") for path in _Server.paths) >= 47
-        ):
-            os.write(master, b"q")
-            phase["step"] = 3
+        if phase["step"] == 2:
+            areas = {
+                path.split("/")[-1].removesuffix(".xml")
+                for path in _Server.paths
+                if path.startswith("/v3/station/list/JP")
+            }
+            if len(areas) >= 47:
+                os.write(master, b"q")
+                phase["step"] = 3
 
     try:
         code, _collected = _pty(["tui"], env, script)
