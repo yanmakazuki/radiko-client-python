@@ -1173,12 +1173,12 @@ def _play_station(
                     media_seconds,
                     cancelled,
                 )
-                if decoded_segment is None:
-                    sequence += 1
-                    continue
                 stamp = decoded_segment.stamp
                 rate = decoded_segment.rate
                 channels = decoded_segment.channels
+                if decoded_segment.discard:
+                    sequence += 1
+                    continue
                 if decoded_segment.stop:
                     reason = "limit"
                     break
@@ -1237,6 +1237,7 @@ class _DecodedSegment:
 
     `media_seconds` はトリム後・limit 切り詰め後の経過秒。`limit_hit` は limit で
     打ち切る必要があることを示す。`stop` は残りが 0 秒で、出力せずに打ち切ることを示す。
+    `discard` はトリムでセグメント全体を捨てることを示す（復号後の状態は保持する）。
     """
 
     samples: np.ndarray
@@ -1247,6 +1248,7 @@ class _DecodedSegment:
     media_seconds: float
     limit_hit: bool
     stop: bool = False
+    discard: bool = False
 
 
 def _decode_segment(
@@ -1262,10 +1264,10 @@ def _decode_segment(
     limit: float | None,
     media_seconds: float,
     cancelled,
-) -> _DecodedSegment | None:
+) -> _DecodedSegment:
     """1セグメントを復号し、シークのトリムと limit の切り詰めを適用する。
 
-    トリムでセグメント全体を捨てる場合は None を返す。
+    トリムでセグメント全体を捨てる場合は discard=True を返す。
     """
     if fragment_decoder is not None and (
         payload[4:8] in {b"moof", b"styp"} or (len(payload) > 8 and payload[4:8] == b"moof")
@@ -1293,7 +1295,10 @@ def _decode_segment(
         target_at, target_seconds = pending
         trimmed = trim_pcm(piece, channels, rate, segment_wall(media, sequence), target_at)
         if trimmed is None:
-            return None
+            empty = piece[:0]
+            return _DecodedSegment(
+                empty, rate, channels, 0, stamp, media_seconds, False, False, True
+            )
         piece, frame_count = trimmed
         media_seconds = target_seconds
     if limit is not None:

@@ -673,3 +673,37 @@ def test_play_station_program_end_reports_metadata_and_full_frames(tmp_path, mon
     assert report.title == "合成番組"
     assert report.frames == PACKETS * 1024
     assert report.frames == 52224
+
+
+def test_decode_segment_discard_keeps_stream_state():
+    """pending がセグメント末尾を超えたら、復号後の rate/channels/stamp を保持して捨てる。"""
+    from radiko.hls import parse_media_playlist
+    from radiko.media import AdtsDecoder
+    from radiko.prepare import _decode_segment
+
+    start = datetime(2026, 10, 15, 12, 0, tzinfo=JST)
+    media = parse_media_playlist(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n"
+        f"#EXT-X-PROGRAM-DATE-TIME:{start.isoformat()}\n"
+        "#EXTINF:1.5,\n/seg.aac\n#EXT-X-ENDLIST\n"
+    )
+    stamp = (0, start)
+    result = _decode_segment(
+        ADTS,
+        media.segments[0],
+        media,
+        media.media_sequence,
+        "mp4a.40.2",
+        AdtsDecoder(),
+        None,
+        stamp,
+        (start + timedelta(seconds=10), 10.0),
+        None,
+        0.0,
+        lambda: False,
+    )
+    assert result.discard is True
+    assert result.samples.size == 0
+    assert result.rate == 44100
+    assert result.channels == 1
+    assert result.stamp == stamp
