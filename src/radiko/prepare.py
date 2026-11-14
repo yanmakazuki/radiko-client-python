@@ -443,9 +443,8 @@ def _join(base: str, uri: str) -> str:
     return urljoin(base, uri)
 
 
-def _sample(
-    media, playlist_url: str, headers, codec, retain: bool, cancelled, encrypted: bool = False
-) -> ProbeReport:
+def _fetch_sample_blob(media, playlist_url: str, headers, cancelled) -> tuple[bytes, bytes]:
+    """先頭セグメントと、あれば初期化セグメントを取得する。"""
     first = media.segments[0]
     sample = b""
     if first.map_uri:
@@ -469,8 +468,33 @@ def _sample(
     ).body
     if not segment:
         raise ProbeError("playlist")
-    blob = sample + segment
-    container = "encrypted" if encrypted or first.encrypted else container_name(blob)
+    return sample, segment
+
+
+@dataclass
+class _DecodedSample:
+    """probe 用サンプルの復号結果。ProbeReport の対応するフィールドへ渡す。"""
+
+    container: str
+    packets: int
+    frames: int
+    rate: int
+    channels: int
+    core_rate: int
+    core_channels: int
+    sbr: bool
+    stereo: bool
+    media_duration: float
+    decode_duration: float
+    nonzero: int
+    decode_error: str | None
+    samples: np.ndarray | None
+
+
+def _decode_sample(
+    blob: bytes, sample: bytes, container: str, codec, retain: bool, cancelled
+) -> _DecodedSample:
+    """サンプルをコンテナ判定して復号し、ProbeReport 用の値を返す。"""
     packets = frames = rate = channels = core_rate = core_channels = 0
     sbr = stereo = False
     media_duration = decode_duration = 0.0
@@ -490,7 +514,7 @@ def _sample(
         started = time.perf_counter()
         try:
             core = FragmentedAacDecoder(sample)
-            decoded = core.decode_pcm(segment, cancelled, codec)
+            decoded = core.decode_pcm(blob[len(sample) :], cancelled, codec)
             packets = decoded.packets
             frames = decoded.frames
             rate = decoded.sample_rate
@@ -526,6 +550,32 @@ def _sample(
         part.strip() in {"mp4a.40.5", "mp4a.40.29"} for part in (codec or "").split(",")
     ):
         decode_error = "HE-AAC宣言に対応するコンテナまたは設定情報を確認できません（AACコアだけの成功とは扱いません）"
+    return _DecodedSample(
+        container,
+        packets,
+        frames,
+        rate,
+        channels,
+        core_rate,
+        core_channels,
+        sbr,
+        stereo,
+        media_duration,
+        decode_duration,
+        nonzero,
+        decode_error,
+        samples,
+    )
+
+
+def _sample(
+    media, playlist_url: str, headers, codec, retain: bool, cancelled, encrypted: bool = False
+) -> ProbeReport:
+    first = media.segments[0]
+    sample, segment = _fetch_sample_blob(media, playlist_url, headers, cancelled)
+    blob = sample + segment
+    container = "encrypted" if encrypted or first.encrypted else container_name(blob)
+    decoded = _decode_sample(blob, sample, container, codec, retain, cancelled)
     return ProbeReport(
         station="",
         starts_at=datetime.now(JST),
@@ -538,21 +588,21 @@ def _sample(
         playlist_seconds=sum(item.duration for item in media.segments),
         end_list=media.end_list,
         declared_codec=codec,
-        container=container,
+        container=decoded.container,
         sample_bytes=len(blob),
-        packets=packets,
-        frames=frames,
-        sample_rate=rate,
-        channels=channels,
-        core_sample_rate=core_rate,
-        core_channels=core_channels,
-        sbr_detected=sbr,
-        stereo_expansion=stereo,
-        media_duration=media_duration,
-        decode_duration=decode_duration,
-        nonzero_samples=nonzero,
-        decode_error=decode_error,
-        samples=samples,
+        packets=decoded.packets,
+        frames=decoded.frames,
+        sample_rate=decoded.rate,
+        channels=decoded.channels,
+        core_sample_rate=decoded.core_rate,
+        core_channels=decoded.core_channels,
+        sbr_detected=decoded.sbr,
+        stereo_expansion=decoded.stereo,
+        media_duration=decoded.media_duration,
+        decode_duration=decoded.decode_duration,
+        nonzero_samples=decoded.nonzero,
+        decode_error=decoded.decode_error,
+        samples=decoded.samples,
         title=None,
     )
 
