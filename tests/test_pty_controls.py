@@ -168,6 +168,16 @@ def _run(argv: list[str], env: dict[str, str], script: bytes, until: bytes) -> t
     return process.returncode, collected
 
 
+def _assert_terminal_restored(before, after):
+    """アプリが触る端末属性だけを比べる。macOS は終了時に PENDIN が立つ。"""
+    before = list(before)
+    after = list(after)
+    pendin = getattr(termios, "PENDIN", 0)
+    before[3] &= ~pendin
+    after[3] &= ~pendin
+    assert after == before
+
+
 def test_interactive_pty_seeks_rejects_unknown_keys_and_cancels(tmp_path):
     server = _serve()
     origin = f"http://127.0.0.1:{server.server_port}"
@@ -244,7 +254,7 @@ def test_tui_pty_restores_the_terminal_after_quit(tmp_path):
     assert sent, text
     assert process.returncode == 0, text
     assert "オフライン" in text
-    assert after == before
+    _assert_terminal_restored(before, after)
 
 
 def test_tui_pty_login_never_prints_the_password(tmp_path):
@@ -302,7 +312,7 @@ def test_tui_pty_login_never_prints_the_password(tmp_path):
     assert "SYNTHETIC_PASSWORD_99" not in text
     assert b"mail=user%40example.invalid" in _Handler.login_body
     assert b"pass=SYNTHETIC_PASSWORD_99" in _Handler.login_body
-    assert after == before
+    _assert_terminal_restored(before, after)
     saved = (tmp_path / "session.json").read_text()
     assert "login-token" in saved
     assert "SYNTHETIC_PASSWORD_99" not in saved
