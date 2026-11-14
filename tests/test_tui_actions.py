@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -113,3 +114,33 @@ def test_named_search_is_loaded_from_the_saved_file(tmp_path):
     assert screen.area == "list"
     assert screen.committed.keyword == "生活"
     assert screen.fetch_programs is True
+
+
+def test_poll_jobs_silences_wrapped_cancel():
+    """開始前キャンセルは at でラップされるが、ERROR 通知を出さない。"""
+    from radiko.stream import ProbeError
+    from radiko_client.tui import poll_jobs
+
+    screen = Screen([], NOW, offline=False)
+    screen.job_generation = 1
+    screen.job_box = queue.Queue(1)
+    screen.job_box.put((1, None, ProbeError("cancelled").at("放送枠取得")))
+    poll_jobs(screen)
+    assert screen.notice is None
+    assert screen.job_box is None
+
+
+def test_poll_jobs_still_reports_non_cancel_error():
+    """キャンセル以外の ProbeError は従来どおり ERROR 通知にする。"""
+    from radiko.stream import ProbeError
+    from radiko_client.tui import NoticeLevel, poll_jobs
+
+    screen = Screen([], NOW, offline=False)
+    screen.job_generation = 1
+    screen.job_box = queue.Queue(1)
+    screen.job_box.put((1, None, ProbeError("network")))
+    poll_jobs(screen)
+    assert screen.notice is not None
+    assert screen.notice.level == NoticeLevel.ERROR
+    assert screen.notice.text == "配信の検証中に通信に失敗しました"
+    assert screen.job_box is None
