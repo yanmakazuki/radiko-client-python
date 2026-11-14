@@ -24,102 +24,13 @@ class InteractiveControl:
 
     def handle(self, line: str) -> None:
         text = line.strip()
-        if text in {"q", "stop"}:
-            self.stopped = True
-            self.generation += 1
+        if self._handle_stop_pause(text):
             return
-        if text == "pause":
-            self.paused = True
-            self.generation += 1
-            self.messages.append("一時停止")
+        if self._handle_volume(text):
             return
-        if text == "resume":
-            if self.paused:
-                self.paused = False
-                if self.mode == "live":
-                    self._request(0.0)
-                else:
-                    self._request(self.position)
+        if self._handle_seek_command(text):
             return
-        if text == "status":
-            state = "一時停止中" if self.paused else "再生中"
-            self.messages.append(f"{state} / 音量{self.volume}% / 再生位置: {self.position:.3f}秒")
-            return
-        if text.startswith("volume "):
-            try:
-                volume = int(text[7:].strip())
-            except ValueError:
-                self.messages.append("音量は0〜100で指定してください")
-                return
-            if not 0 <= volume <= 100:
-                self.messages.append("音量は0〜100で指定してください")
-                return
-            self.volume = volume
-            return
-        if text in {"+15", "-15"}:
-            delta = 15 if text == "+15" else -15
-            if self.mode == "live" and delta > 0:
-                self.messages.append(
-                    "シーク不可: タイムフリーの放送枠内を指定してください（再生を継続）"
-                )
-                return
-            target = max(0.0, self.position + delta)
-            self._seek(target)
-            return
-        if text.startswith("seek "):
-            try:
-                target = float(text[5:].strip())
-            except ValueError:
-                self.messages.append("秒数を指定してください")
-                return
-            self._seek(target)
-            return
-        if text.startswith("live ") or text.startswith("timefree "):
-            parts = text.split()
-            guidance = "live 局ID / timefree 局ID YYYYMMDDHHmmss [--offset 秒数] を指定してください"
-            if len(parts) < 2:
-                self.messages.append(guidance)
-                return
-            try:
-                validate_station(parts[1])
-            except Exception:
-                self.messages.append(guidance)
-                return
-            mode = parts[0]
-            offset = 0.0
-            now = datetime.now(timezone.utc)
-            if mode == "timefree":
-                if len(parts) < 3:
-                    self.messages.append(guidance)
-                    return
-                try:
-                    cursor = parse_time(parts[2])
-                except Exception:
-                    self.messages.append(guidance)
-                    return
-                rest = parts[3:]
-                if rest:
-                    if len(rest) != 2 or rest[0] != "--offset":
-                        self.messages.append(guidance)
-                        return
-                    try:
-                        offset = float(rest[1])
-                    except ValueError:
-                        self.messages.append(guidance)
-                        return
-                    if not 0 <= offset <= 86400:
-                        self.messages.append(guidance)
-                        return
-                if cursor > now:
-                    self.messages.append(guidance)
-                    return
-            else:
-                if len(parts) > 2:
-                    self.messages.append(guidance)
-                    return
-                cursor = now
-            self.selected = (mode, parts[1], cursor, offset)
-            self._request(offset)
+        if self._handle_source(text):
             return
         self.messages.append(
             "live 局ID / timefree 局ID YYYYMMDDHHmmss [--offset 秒数] / status / pause / "
