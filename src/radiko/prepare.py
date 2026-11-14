@@ -1248,6 +1248,83 @@ def _play_station(
         )
 
 
+@dataclass
+class _DecodedSegment:
+    """1セグメントの復号結果。
+
+    `media_seconds` はトリム後・limit 切り詰め後の経過秒。`limit_hit` は limit で
+    打ち切る必要があることを示す。`stop` は残りが 0 秒で、出力せずに打ち切ることを示す。
+    """
+
+    samples: np.ndarray
+    rate: int
+    channels: int
+    frames: int
+    stamp: tuple[int, datetime] | None
+    media_seconds: float
+    limit_hit: bool
+    stop: bool = False
+
+
+def _decode_segment(
+    payload: bytes,
+    segment,
+    media,
+    sequence: int,
+    codec: str | None,
+    decoder: AdtsDecoder,
+    fragment_decoder: FragmentedAacDecoder | None,
+    stamp: tuple[int, datetime] | None,
+    pending: tuple[datetime, float] | None,
+    limit: float | None,
+    media_seconds: float,
+    cancelled,
+) -> _DecodedSegment | None:
+    """1セグメントを復号し、シークのトリムと limit の切り詰めを適用する。
+
+    トリムでセグメント全体を捨てる場合は None を返す。
+    """
+    if fragment_decoder is not None and (
+        payload[4:8] in {b"moof", b"styp"} or (len(payload) > 8 and payload[4:8] == b"moof")
+    ):
+        decoded = fragment_decoder.decode_pcm(payload, cancelled, codec)
+        piece = decoded.samples
+        rate = decoded.sample_rate
+        channels = decoded.channels
+        frame_count = decoded.frames
+        stamp = accept_fragment(
+            segment.duration,
+            frame_count / rate,
+            decoded.decode_time,
+            decoded.timescale,
+            segment_wall(media, sequence),
+            stamp,
+        )
+    else:
+        pcm = decoder.decode_segment_pcm(payload, codec, cancelled)
+        piece = pcm.samples
+        rate = pcm.summary.sample_rate
+        channels = pcm.summary.channels
+        frame_count = pcm.summary.frames
+    if pending is not None:
+        target_at, target_seconds = pending
+        trimmed = trim_pcm(piece, channels, rate, segment_wall(media, sequence), target_at)
+        if trimmed is None:
+            return None
+        piece, frame_count = trimmed
+        media_seconds = target_seconds
+    if limit is not None:
+        room = limit - media_seconds
+        if room <= 0:
+            empty = piece[:0]
+            return _DecodedSegment(empty, rate, channels, 0, stamp, media_seconds, True, True)
+        max_frames = int(room * rate)
+        if frame_count > max_frames:
+            piece = piece[: max_frames * channels]
+            return _DecodedSegment(piece, rate, channels, max_frames, stamp, media_seconds, True)
+    return _DecodedSegment(piece, rate, channels, frame_count, stamp, media_seconds, False)
+
+
 class _StopView:
     def __init__(self, function) -> None:
         self.function = function
