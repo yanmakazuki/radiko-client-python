@@ -1159,59 +1159,42 @@ def _play_station(
                     raise
                 reauth.episode = False
                 codec = getattr(media, "declared_codec", None) or codec
-                if fragment_decoder is not None and (
-                    payload[4:8] in {b"moof", b"styp"}
-                    or (len(payload) > 8 and payload[4:8] == b"moof")
-                ):
-                    decoded = fragment_decoder.decode_pcm(payload, cancelled, codec)
-                    piece = decoded.samples
-                    rate = decoded.sample_rate
-                    channels = decoded.channels
-                    frame_count = decoded.frames
-                    stamp = accept_fragment(
-                        segment.duration,
-                        frame_count / rate,
-                        decoded.decode_time,
-                        decoded.timescale,
-                        segment_wall(media, sequence),
-                        stamp,
-                    )
-                else:
-                    pcm = decoder.decode_segment_pcm(payload, codec, cancelled)
-                    piece = pcm.samples
-                    rate = pcm.summary.sample_rate
-                    channels = pcm.summary.channels
-                    frame_count = pcm.summary.frames
+                decoded_segment = _decode_segment(
+                    payload,
+                    segment,
+                    media,
+                    sequence,
+                    codec,
+                    decoder,
+                    fragment_decoder,
+                    stamp,
+                    pending,
+                    limit,
+                    media_seconds,
+                    cancelled,
+                )
+                if decoded_segment is None:
+                    sequence += 1
+                    continue
+                stamp = decoded_segment.stamp
+                rate = decoded_segment.rate
+                channels = decoded_segment.channels
+                if decoded_segment.stop:
+                    reason = "limit"
+                    break
                 if pending is not None:
-                    target_at, target_seconds = pending
-                    trimmed = trim_pcm(
-                        piece, channels, rate, segment_wall(media, sequence), target_at
-                    )
-                    if trimmed is None:
-                        sequence += 1
-                        continue
-                    piece, frame_count = trimmed
-                    media_seconds = target_seconds
                     pending = None
-                if limit is not None:
-                    room = limit - media_seconds
-                    if room <= 0:
-                        reason = "limit"
-                        break
-                    max_frames = int(room * rate)
-                    if frame_count > max_frames:
-                        piece = piece[: max_frames * channels]
-                        emit(piece, rate, channels)
-                        taken += 1
-                        sequence += 1
-                        reason = "limit"
-                        break
-                if len(piece):
-                    emit(piece, rate, channels)
-                media_seconds += len(piece) / channels / rate
+                if len(decoded_segment.samples):
+                    emit(decoded_segment.samples, rate, channels)
+                media_seconds = (
+                    decoded_segment.media_seconds + len(decoded_segment.samples) / channels / rate
+                )
                 taken += 1
                 sequence += 1
                 budget.reset()
+                if decoded_segment.limit_hit:
+                    reason = "limit"
+                    break
                 if limit is not None and media_seconds >= limit:
                     reason = "limit"
                     break
