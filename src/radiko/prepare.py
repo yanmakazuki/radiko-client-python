@@ -572,85 +572,10 @@ def _sample(
     media, playlist_url: str, headers, codec, retain: bool, cancelled, encrypted: bool = False
 ) -> ProbeReport:
     first = media.segments[0]
-    sample = b""
-    if first.map_uri:
-        sample = stream_get(
-            _join(playlist_url, first.map_uri),
-            {},
-            limit=TEXT_LIMIT,
-            cancelled=cancelled,
-            redirects=True,
-            readonly_retry=True,
-        ).body
-        if not sample:
-            raise ProbeError("playlist")
-    segment = stream_get(
-        _join(playlist_url, first.uri),
-        {},
-        limit=SAMPLE_LIMIT,
-        cancelled=cancelled,
-        redirects=True,
-        readonly_retry=True,
-    ).body
-    if not segment:
-        raise ProbeError("playlist")
+    sample, segment = _fetch_sample_blob(media, playlist_url, headers, cancelled)
     blob = sample + segment
     container = "encrypted" if encrypted or first.encrypted else container_name(blob)
-    packets = frames = rate = channels = core_rate = core_channels = 0
-    sbr = stereo = False
-    media_duration = decode_duration = 0.0
-    nonzero = 0
-    decode_error = None
-    samples = None
-    offset = id3_offset(blob)
-    adts = (
-        offset is not None
-        and len(blob) - offset >= 2
-        and blob[offset] == 0xFF
-        and (blob[offset + 1] & 0xF0) == 0xF0
-    )
-    if container == "encrypted":
-        decode_error = None
-    elif container.startswith("ISO BMFF") and sample:
-        started = time.perf_counter()
-        try:
-            core = FragmentedAacDecoder(sample)
-            decoded = core.decode_pcm(segment, cancelled, codec)
-            packets = decoded.packets
-            frames = decoded.frames
-            rate = decoded.sample_rate
-            channels = decoded.channels
-            core_rate = core.sample_rate
-            core_channels = core.channels
-            sbr = rate > core_rate
-            stereo = core_channels == 1 and channels == 2
-            media_duration = frames / rate
-            decode_duration = time.perf_counter() - started
-            nonzero = int(np.count_nonzero(decoded.samples))
-            samples = decoded.samples if retain else None
-        except AacError as error:
-            decode_error = str(error)
-    elif adts:
-        try:
-            pcm = AdtsDecoder().decode_segment_pcm(blob, codec, cancelled or (lambda: False))
-            packets = pcm.summary.packets
-            frames = pcm.summary.frames
-            rate = pcm.summary.sample_rate
-            channels = pcm.summary.channels
-            core_rate = pcm.summary.core_sample_rate
-            core_channels = pcm.summary.core_channels
-            sbr = pcm.summary.sbr_detected
-            stereo = pcm.summary.stereo_expansion
-            media_duration = pcm.summary.media_duration
-            decode_duration = pcm.summary.decode_duration
-            nonzero = pcm.summary.nonzero_samples
-            samples = pcm.samples if retain else None
-        except AacError as error:
-            decode_error = str(error)
-    elif codec and any(
-        part.strip() in {"mp4a.40.5", "mp4a.40.29"} for part in (codec or "").split(",")
-    ):
-        decode_error = "HE-AAC宣言に対応するコンテナまたは設定情報を確認できません（AACコアだけの成功とは扱いません）"
+    decoded = _decode_sample(blob, sample, container, codec, retain, cancelled)
     return ProbeReport(
         station="",
         starts_at=datetime.now(JST),
@@ -663,21 +588,21 @@ def _sample(
         playlist_seconds=sum(item.duration for item in media.segments),
         end_list=media.end_list,
         declared_codec=codec,
-        container=container,
+        container=decoded.container,
         sample_bytes=len(blob),
-        packets=packets,
-        frames=frames,
-        sample_rate=rate,
-        channels=channels,
-        core_sample_rate=core_rate,
-        core_channels=core_channels,
-        sbr_detected=sbr,
-        stereo_expansion=stereo,
-        media_duration=media_duration,
-        decode_duration=decode_duration,
-        nonzero_samples=nonzero,
-        decode_error=decode_error,
-        samples=samples,
+        packets=decoded.packets,
+        frames=decoded.frames,
+        sample_rate=decoded.rate,
+        channels=decoded.channels,
+        core_sample_rate=decoded.core_rate,
+        core_channels=decoded.core_channels,
+        sbr_detected=decoded.sbr,
+        stereo_expansion=decoded.stereo,
+        media_duration=decoded.media_duration,
+        decode_duration=decoded.decode_duration,
+        nonzero_samples=decoded.nonzero,
+        decode_error=decoded.decode_error,
+        samples=decoded.samples,
         title=None,
     )
 
