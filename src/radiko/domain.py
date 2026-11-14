@@ -69,7 +69,8 @@ STATUS_LABEL = {
 def broadcast_status(start: datetime, end: datetime, now: datetime) -> str:
     """now が開始前・放送中・終了後のどれかを返す。
 
-    終了が開始以前なら ValueError。放送日の境界は `broadcast_day` の JST 05:00。
+    終了が開始以前なら ValueError。放送日の境界（JST 05:00）はこの関数では扱わず、
+    `broadcast_day` を使うのは呼び出し側。
     """
     if end <= start:
         raise ValueError("放送終了日時が開始日時以前です")
@@ -248,7 +249,9 @@ class Filter:
     ) -> Filter:
         """分類IDとキーワードを検証して正規化した Filter を作る。
 
-        分類IDは空・128バイト超・制御文字、キーワードは空・1024バイト超・制御文字で ValueError。
+        分類IDの各要素は空文字・128バイト超・制御文字で ValueError（空リストは有効）。
+        キーワードは空文字・1024バイト超・制御文字で ValueError。作った条件は `matches`
+        が軸間 AND・同一軸内 OR で評価する。
         """
         keyword_text = None if keyword is None else keyword.strip()
         if keyword_text is not None and (
@@ -276,9 +279,10 @@ class Filter:
         )
 
     def matches(self, program: Program) -> bool:
-        """番組が条件に一致するかを返す。番組分類・出演者分類・キーワードを AND で評価する。
+        """番組が条件に一致するかを返す。軸間は AND、同一軸内は OR。
 
-        分類IDが空で未分類を許さない軸は常に一致し、未分類を許す軸は分類なしも一致する。
+        分類IDが空で未分類を許さない軸は全件に一致する。未分類を許す軸は、IDが
+        空なら分類なしだけ、IDがあればそのいずれか（OR）か分類なしに一致する。
         """
         return (
             _matches_class(
@@ -306,7 +310,10 @@ class Filter:
 
     @classmethod
     def from_dict(cls, value: dict) -> Filter:
-        """保存用の辞書から復元する。未知キーと型違反は ValueError("invalid")。"""
+        """保存用の辞書から復元する。
+
+        未知キーは ValueError("unknown")、必須キー欠落は KeyError、型違反は ValueError("invalid")。
+        """
         _reject_unknown(
             value,
             {
@@ -342,7 +349,11 @@ class Filter:
 
 
 def _matches_class(items: list[Classification], ids: frozenset[str], empty: bool) -> bool:
-    """1つの分類軸の一致判定。ID 指定が空なら全件、未分類可なら分類なしも一致。"""
+    """1つの分類軸の一致判定。
+
+    ID指定が空なら、未分類を許さない軸は全件、許す軸は分類なしだけに一致する。
+    IDがあれば、そのいずれか（OR）か、未分類可なら分類なしにも一致する。
+    """
     if not ids and not empty:
         return True
     if empty and not items:
@@ -352,7 +363,10 @@ def _matches_class(items: list[Classification], ids: frozenset[str], empty: bool
 
 @dataclass(frozen=True)
 class ObservedClassifications:
-    """取得した番組から観測した分類と、分類なしの件数。放送局の選択肢に使う。"""
+    """取得した番組から観測した分類と、分類なしの件数。
+
+    CLI の --classifications 表示と、TUI の分類フィルタ選択肢に使う。
+    """
 
     program_genres: list[Classification]
     personality_genres: list[Classification]
@@ -513,7 +527,11 @@ def _reject_unknown(value: dict, allowed: set[str]) -> None:
 
 
 def criteria_from_file(value: dict) -> SearchCriteria:
-    """保存用の辞書から SearchCriteria を復元する。未知キー・型・範囲の不正は ValueError("invalid")。"""
+    """保存用の辞書から SearchCriteria を復元する。
+
+    未知キーは ValueError("unknown")、必須キー欠落は KeyError、start/end などの
+    型不正は TypeError、形・値の不正は ValueError("invalid")。
+    """
     _reject_unknown(value, {"scope", "start", "end", "filter"})
     scope_value = value["scope"]
     if not isinstance(scope_value, dict) or set(scope_value) - {"kind", "value"}:
