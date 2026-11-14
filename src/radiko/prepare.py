@@ -81,7 +81,7 @@ class ProbeReport:
     decode_duration: float
     nonzero_samples: int
     decode_error: str | None
-    samples: list[float] | None
+    samples: np.ndarray | None
     title: str | None
 
     def __repr__(self) -> str:
@@ -623,8 +623,8 @@ def _apply_seek(control, media, sequence: int, media_seconds: float, origin: dat
     control.applied = len(control.accepted)
     target_at = origin + timedelta(seconds=target)
     schedule = segment_schedule(media)
-    first_wall = None
-    last_wall = None
+    first_wall: datetime | None = None
+    last_wall: datetime | None = None
     last_duration = 0.0
     cursor = media.media_sequence
     skipping = True
@@ -640,8 +640,10 @@ def _apply_seek(control, media, sequence: int, media_seconds: float, origin: dat
             cursor += 1
         else:
             skipping = False
-    if first_wall is not None and (
-        target_at < first_wall or target_at >= last_wall + timedelta(seconds=last_duration)
+    if (
+        first_wall is not None
+        and last_wall is not None
+        and (target_at < first_wall or target_at >= last_wall + timedelta(seconds=last_duration))
     ):
         return sequence, media_seconds, pending, target
     return cursor, target, (target_at, target), None

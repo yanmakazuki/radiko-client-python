@@ -268,7 +268,7 @@ class AdtsDecoder:
 
 def _decode_adts(data: bytes | memoryview) -> tuple[np.ndarray, int, int]:
     try:
-        container = av.open(io.BytesIO(data), format="aac")
+        container = av.open(io.BytesIO(data), format="aac", mode="r")
     except av.FFmpegError as error:
         raise AacError("decode") from error
     chunks: list[np.ndarray] = []

@@ -158,6 +158,8 @@ class Stream:
         self.lib = library()
         if self.lib is None:
             raise OutputError("none")
+        # 最後にコールバックが返った時刻。未完了バッファが 0 の間は進まない。
+        self.last_callback: float | None = None
 
         def completed(_user, queue, buffer) -> None:
             self.outstanding = max(0, self.outstanding - 1)
@@ -182,7 +184,6 @@ class Stream:
         self.queued_frames = 0
         self.played_frames = 0
         self.completed_frames = 0
-        self.last_callback: float | None = None
         # 未完了バッファが 0→1 になった時刻。休止あけの猶予をここから数える。
         self.queue_active_at = 0.0
         self.closed = False
@@ -355,8 +356,10 @@ def _default_output():
             return None
         name = _device_name(coreaudio, corefoundation, device)
         nominal = _nominal_rates(coreaudio, device)
+        if name is None or nominal is None:
+            return None
         formats = _stream_formats(coreaudio, device, nominal)
-        if name is None or nominal is None or formats is None:
+        if formats is None:
             return None
         return name, nominal, formats
     except (AttributeError, OSError, ValueError):
@@ -472,7 +475,7 @@ def _stream_formats(
     if raw is None:
         return None
     streams = (ctypes.c_uint32 * count).from_buffer_copy(raw)
-    formats: list[tuple[float, float, int]] = []
+    formats: list[tuple[float, float, int, str]] = []
     for stream in streams:
         stream_address = _address(STREAM_AVAILABLE_FORMATS)
         stream_size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, stream, stream_address)

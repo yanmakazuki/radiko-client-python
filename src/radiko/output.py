@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from typing import cast
 
 import numpy as np
 
@@ -412,8 +413,9 @@ def _write_pcm(opened, samples, sample_format: str, channels: int) -> tuple[int,
     cursor = 0
     underruns = 0
     retries = 0
+    base_address = cast(int, base.value)
     while cursor < frames:
-        pointer = ctypes.c_void_p(base.value + cursor * item_size)
+        pointer = ctypes.c_void_p(base_address + cursor * item_size)
         written = library.snd_pcm_writei(handle, pointer, frames - cursor)
         if written == 0:
             retries += 1

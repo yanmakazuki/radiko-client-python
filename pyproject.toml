@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.3.5", "ruff==0.14.2"]
+dev = ["mypy==2.4.1", "pytest==8.3.5", "ruff==0.14.2"]
 
 [project.scripts]
 radiko-client = "radiko_client.cli:main"
@@ -27,6 +27,12 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 radiko_client = ["help_text.txt"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_unused_ignores = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

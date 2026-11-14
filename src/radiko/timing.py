@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import numpy as np
+
 from radiko.hls import segment_wall as _segment_wall
 from radiko.media import AacError
 from radiko.stream import ProbeError
@@ -43,12 +45,12 @@ def segment_wall(media, sequence: int) -> datetime | None:
 
 
 def trim_pcm(
-    samples: list[float],
+    samples: np.ndarray,
     channels: int,
     rate: int,
     start: datetime | None,
     target: datetime | None,
-) -> tuple[list[float], int] | None:
+) -> tuple[np.ndarray, int] | None:
     """番組時刻から目標までを切り捨てる。セグメント全体より先なら None。
 
     捨てるフレーム数はナノ秒×サンプルレートを切り上げる。Rust の `trim_to` と同じ式。
