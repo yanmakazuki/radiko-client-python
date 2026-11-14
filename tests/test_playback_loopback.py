@@ -512,3 +512,164 @@ def test_decode_failure_in_second_segment_closes_the_stream(tmp_path, monkeypatc
     assert calls["decode"] >= 2
     assert len(opened) == 1
     assert len(closed) == 1
+
+
+def test_play_station_limit_stops_mid_segment(tmp_path, monkeypatch):
+    """limit は1セグメントの途中でも、指定秒ぶんだけ出力して止まる。"""
+    import radiko.output as output
+    from radiko.auth import MemberClient
+    from radiko.prepare import play_station
+
+    server = _serve()
+    _env(monkeypatch, server, tmp_path)
+    opened = []
+    original = output.open_stream
+
+    def counted(*args, **kwargs):
+        opened.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(output, "open_stream", counted)
+    yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y%m%d120000")
+    cursor = datetime.strptime(yesterday, "%Y%m%d%H%M%S").replace(tzinfo=JST)
+    session = MemberSession("synthetic-token")
+    membership = MemberClient.create().check(session)
+    try:
+        report = play_station(
+            "TBS",
+            "timefree",
+            cursor,
+            datetime.now(UTC),
+            session,
+            membership,
+            0.0,
+            0.5,
+            lambda: False,
+        )
+    finally:
+        server.shutdown()
+    assert report.reason == "limit"
+    assert abs(report.frames - 0.5 * report.sample_rate) <= 1
+    assert report.frames == 22050
+    assert report.segments == 1
+    assert len(opened) == 1
+
+
+def test_play_station_limit_zero_emits_nothing(tmp_path, monkeypatch):
+    """limit=0 は音声ストリームを開かず、空のレポートを返す。"""
+    import radiko.output as output
+    from radiko.auth import MemberClient
+    from radiko.prepare import play_station
+
+    server = _serve()
+    _env(monkeypatch, server, tmp_path)
+    opened = []
+    original = output.open_stream
+
+    def counted(*args, **kwargs):
+        opened.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(output, "open_stream", counted)
+    yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y%m%d120000")
+    cursor = datetime.strptime(yesterday, "%Y%m%d%H%M%S").replace(tzinfo=JST)
+    session = MemberSession("synthetic-token")
+    membership = MemberClient.create().check(session)
+    try:
+        report = play_station(
+            "TBS",
+            "timefree",
+            cursor,
+            datetime.now(UTC),
+            session,
+            membership,
+            0.0,
+            0.0,
+            lambda: False,
+        )
+    finally:
+        server.shutdown()
+    assert report.reason == "limit"
+    assert report.frames == 0
+    assert report.segments == 0
+    assert opened == []
+
+
+def test_play_station_cancel_before_prepare_raises_probe_error(tmp_path, monkeypatch):
+    """開始前のキャンセルは、レポートではなく放送枠取得の ProbeError になる。"""
+    import pytest
+
+    import radiko.output as output
+    from radiko.auth import MemberClient
+    from radiko.prepare import play_station
+    from radiko.stream import ProbeError
+
+    server = _serve()
+    _env(monkeypatch, server, tmp_path)
+    opened = []
+    original = output.open_stream
+
+    def counted(*args, **kwargs):
+        opened.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(output, "open_stream", counted)
+    yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y%m%d120000")
+    cursor = datetime.strptime(yesterday, "%Y%m%d%H%M%S").replace(tzinfo=JST)
+    session = MemberSession("synthetic-token")
+    membership = MemberClient.create().check(session)
+    try:
+        with pytest.raises(ProbeError) as raised:
+            play_station(
+                "TBS",
+                "timefree",
+                cursor,
+                datetime.now(UTC),
+                session,
+                membership,
+                0.0,
+                1.0,
+                lambda: True,
+            )
+    finally:
+        server.shutdown()
+    error = raised.value
+    assert error.code == "at"
+    assert error.stage == "放送枠取得"
+    assert error.inner is not None
+    assert error.inner.code == "cancelled"
+    assert "配信取得を取り消しました" in str(error)
+    assert opened == []
+
+
+def test_play_station_program_end_reports_metadata_and_full_frames(tmp_path, monkeypatch):
+    """ENDLIST の1セグメントを最後まで出し、番組のメタデータを返す。"""
+    from radiko.auth import MemberClient
+    from radiko.prepare import play_station
+
+    server = _serve()
+    _env(monkeypatch, server, tmp_path)
+    yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y%m%d120000")
+    cursor = datetime.strptime(yesterday, "%Y%m%d%H%M%S").replace(tzinfo=JST)
+    session = MemberSession("synthetic-token")
+    membership = MemberClient.create().check(session)
+    try:
+        report = play_station(
+            "TBS",
+            "timefree",
+            cursor,
+            datetime.now(UTC),
+            session,
+            membership,
+            0.0,
+            None,
+            lambda: False,
+        )
+    finally:
+        server.shutdown()
+    assert report.reason == "program-end"
+    assert report.station == "TBS"
+    assert report.mode == "TimeFree"
+    assert report.title == "合成番組"
+    assert report.frames == PACKETS * 1024
+    assert report.frames == 52224
