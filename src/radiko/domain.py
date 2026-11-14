@@ -49,6 +49,11 @@ def broadcast_day(now: datetime) -> date:
 
 
 class BroadcastStatus:
+    """放送前・放送中・放送終了の3値。
+
+    `broadcast_status` が now と開始・終了時刻を比べて決める。放送日は JST 05:00 で切り替わる。
+    """
+
     UPCOMING = "upcoming"
     ON_AIR = "on_air"
     FINISHED = "finished"
@@ -72,12 +77,19 @@ def broadcast_status(start: datetime, end: datetime, now: datetime) -> str:
 
 
 class ListeningAvailability:
+    """再生可否の観測値。実際に再生を試した結果だけを表す。
+
+    CURRENT は「現在の再生で確認済み」で、局や条件を変えた再操作では再確認する。
+    """
+
     UNKNOWN = "再生可否未確認"
     CURRENT = "現在の再生で配信確認済み（再操作時は再確認）"
 
 
 @dataclass(frozen=True)
 class ProgramKey:
+    """局IDと開始時刻で番組を一意にするキー。番組表・保存・TUI の選択が共有する。"""
+
     station_id: str
     starts_at: datetime
 
@@ -87,12 +99,16 @@ class ProgramKey:
 
 @dataclass(frozen=True)
 class Classification:
+    """番組や出演者の分類。radiko の genre id と表示名の組。"""
+
     id: str
     name: str
 
 
 @dataclass
 class Program:
+    """番組表の1番組。catalog が作り、CLI と TUI が読む。"""
+
     key: ProgramKey
     program_id: str
     ends_at: datetime
@@ -117,12 +133,16 @@ class Program:
 
 @dataclass(frozen=True)
 class Station:
+    """放送局。保存と検索条件は局IDだけを使い、名前は表示用。"""
+
     id: str
     name: str
 
 
 @dataclass
 class BroadcastRange:
+    """検索対象の放送日範囲。開始・終了と、列挙済みの days を持つ。"""
+
     start: date
     end: date
     days: list[date]
@@ -148,6 +168,8 @@ class BroadcastRange:
 
 @dataclass
 class Chapter:
+    """チャプター1件。開始・終了は番組先頭からの秒で、source_index は元の並び。"""
+
     title: str
     summary: str
     start: float
@@ -157,6 +179,8 @@ class Chapter:
 
 @dataclass
 class ChapterSet:
+    """チャプターの集合。不正件数と音楽件数を添えて画面へ渡す。"""
+
     chapters: list[Chapter]
     invalid_count: int
     music_count: int
@@ -182,6 +206,11 @@ def _ids(values: list[str]) -> list[str]:
 
 @dataclass
 class Filter:
+    """検索条件。番組・出演者の分類ID、未分類の可否、キーワードを持つ。
+
+    `matches` は指定した軸のすべてを AND で評価する。
+    """
+
     program_genres: list[str] = field(default_factory=list)
     personality_genres: list[str] = field(default_factory=list)
     unclassified_program: bool = False
@@ -300,6 +329,8 @@ def _matches_class(items: list[Classification], ids: frozenset[str], empty: bool
 
 @dataclass(frozen=True)
 class ObservedClassifications:
+    """取得した番組から観測した分類と、分類なしの件数。放送局の選択肢に使う。"""
+
     program_genres: list[Classification]
     personality_genres: list[Classification]
     unclassified_programs: int
@@ -346,6 +377,8 @@ class ObservedClassifications:
 
 
 class ScopeKind:
+    """検索範囲の種類。全国・1局・複数エリアの3つ。"""
+
     NATIONWIDE = "nationwide"
     STATION = "station"
     AREAS = "areas"
@@ -353,6 +386,8 @@ class ScopeKind:
 
 @dataclass
 class Scope:
+    """検索範囲。全国は value なし、局は局ID、エリアは地域IDの並びを持つ。"""
+
     kind: str
     value: str | list[str] | None = None
 
@@ -388,6 +423,8 @@ def _valid_area(area: str) -> bool:
 
 @dataclass
 class SearchCriteria:
+    """検索条件の一式。範囲・放送日・フィルタをまとめ、保存と起動時復元に使う。"""
+
     scope: Scope
     range: BroadcastRange
     filter: Filter
