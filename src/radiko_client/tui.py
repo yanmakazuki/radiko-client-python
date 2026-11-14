@@ -575,9 +575,12 @@ class Screen:
             self._esc()
             return
         self._dismiss_for_key(key)
-        if key in {"q"}:
-            self._quit()
+        if self._move_selection(key):
             return
+        self._list_action(key)
+
+    def _move_selection(self, key: str) -> bool:
+        """一覧の選択位置を動かすキーなら処理して True を返す。"""
         if key in {"j", "down"}:
             self.selected = min(self.selected + 1, max(len(self.visible()) - 1, 0))
         elif key in {"k", "up"}:
@@ -590,6 +593,14 @@ class Screen:
             self.selected = max(self.selected - self._page(), 0)
         elif key == "pagedown":
             self.selected = min(self.selected + self._page(), max(len(self.visible()) - 1, 0))
+        else:
+            return False
+        return True
+
+    def _list_action(self, key: str) -> None:
+        """一覧画面の操作キーを処理する。移動系は _move_selection が先に受ける。"""
+        if key == "q":
+            self._quit()
         elif key == "/":
             self.area = "keyword"
             self.draft_keyword = LineEditor.new(self.committed.keyword or "", 1024)
@@ -610,21 +621,18 @@ class Screen:
             self._on_air()
         elif key == "o" and self.area == "list":
             self._station_draft()
-        elif key == " ":
-            if self.playing:
-                self.paused = not self.paused
-                self._command("pause" if self.paused else "resume")
-                self._set_notice(
-                    NoticeLevel.INFO, "一時停止" if self.paused else "再生中", sticky=False
-                )
+        elif key == " " and self.playing:
+            self.paused = not self.paused
+            text = "一時停止" if self.paused else "再生中"
+            self._command("pause" if self.paused else "resume")
+            self._set_notice(NoticeLevel.INFO, text, sticky=False)
         elif key in {"+", "-"}:
             self.volume = min(100, self.volume + 5) if key == "+" else max(0, self.volume - 5)
             self._command(f"volume {self.volume}")
         elif key == "s":
             if self.playing and self.job_cancel is not None:
                 self.job_cancel.set()
-            self.playing = None
-            self.paused = False
+            self.playing, self.paused = None, False
             self._set_notice(NoticeLevel.INFO, "停止しました", sticky=False)
         elif key == "left":
             if self._seek(-15) and self.play_mode == "timefree":
@@ -650,10 +658,9 @@ class Screen:
             if not self.offline:
                 self.area = "logout"
         elif key == "a":
+            sentence = "オフライン確認ではセッションを通信確認しません"
             if self.offline:
-                self._set_notice(
-                    NoticeLevel.INFO, "オフライン確認ではセッションを通信確認しません", sticky=False
-                )
+                self._set_notice(NoticeLevel.INFO, sentence, sticky=False)
             else:
                 self.auth_refresh = True
         elif key == "enter":
