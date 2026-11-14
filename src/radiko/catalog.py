@@ -319,7 +319,7 @@ def _parse_document(text: str, root_name: str) -> ET.Element:
     """1回のパースで要素ツリー・ルート名・最大深さを検証する。"""
     if _FORBIDDEN_DECLARATION.search(text):
         raise CatalogError("xml")
-    parser = ET.XMLPullParser(events=("start", "end"))
+    parser: ET.XMLPullParser = ET.XMLPullParser(events=("start", "end"))
     root: ET.Element | None = None
     depth = 0
 

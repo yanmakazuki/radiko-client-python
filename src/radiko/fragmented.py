@@ -52,7 +52,7 @@ class _Atom:
 def _atoms(data) -> list[_Atom]:
     view = memoryview(data)
     total = len(view)
-    result = []
+    result: list[_Atom] = []
     at = 0
     while at < total:
         if len(result) == 8192:
@@ -209,7 +209,7 @@ class FragmentedAacDecoder:
         self.asc = asc
         self.sample_rate = rate
         self.channels = channels
-        self._codec = None
+        self._codec: av.CodecContext | None = None
         self.next_time: int | None = None
         self.next_sequence: int | None = None
 
@@ -346,19 +346,22 @@ class FragmentedAacDecoder:
 
     def _decode(self, data: bytes, cancelled, declared: str | None) -> FragmentPcm:
         media = self._read(data, cancelled)
-        if self._codec is None:
-            context = av.CodecContext.create("aac", "r")
-            context.extradata = bytes(self.asc)
-            context.sample_rate = self.sample_rate
-            context.layout = "mono" if self.channels == 1 else "stereo"
-            self._codec = context
+        codec = self._codec
+        if codec is None:
+            codec = av.CodecContext.create("aac", "r")
+            codec.extradata = bytes(self.asc)
+            # PyAV 14.2 の型スタブには、実行時に存在するこの2属性が無い。
+            codec.sample_rate = self.sample_rate  # type: ignore[attr-defined]
+            codec.layout = "mono" if self.channels == 1 else "stereo"  # type: ignore[attr-defined]
+            self._codec = codec
         samples: list[np.ndarray] = []
         rate = self.sample_rate
         channels = self.channels
         for packet in media["packets"]:
             if cancelled():
                 raise AacError("cancelled")
-            for frame in self._codec.decode(av.Packet(packet)):
+            # PyAV 14.2 の型スタブは CodecContext.decode を宣言していない。
+            for frame in codec.decode(av.Packet(packet)):  # type: ignore[attr-defined]
                 plane = frame.to_ndarray()
                 if plane.ndim == 1:
                     interleaved = plane.reshape(-1)

@@ -32,6 +32,7 @@ class MediaPlaylist:
     version: int | None = None
     i_frames_only: bool = False
     discontinuity_sequence: int = 0
+    declared_codec: str | None = None
     _schedule: SegmentSchedule | None = field(default=None, init=False, repr=False, compare=False)
 
 
