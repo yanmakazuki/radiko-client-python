@@ -17,6 +17,7 @@ Rust 版 [radiko-client](https://github.com/yanmakazuki/radiko-client) の Pytho
 - [TUI](#tui)
 - [テスト方針](#テスト方針)
 - [既知の制約](#既知の制約)
+- [変更履歴](#変更履歴)
 - [アーキテクチャ](docs/architecture.md)
 - [開発への参加](CONTRIBUTING.md)
 - [Rust版との対応](docs/parity.md)
@@ -159,6 +160,10 @@ Linux CI を最終根拠にします。macOS は 0 failed、skip 3件（ALSA / c
 - 実機の音声出力は未検証です。Linux は ALSA、macOS は AudioQueue を使います。レート変換はしません。
 - HE-AAC、fMP4、再生中の再認証は部分対応です。`docs/parity.md` の状態「意図した差」「未実装」を正とします。
 - 実アカウントのログインと実配信の成功再生は、このリポジトリでは確認していません。
+
+## 変更履歴
+
+変更の一覧は [CHANGELOG.md](CHANGELOG.md) にあります。
 
 ## ライセンス
 
