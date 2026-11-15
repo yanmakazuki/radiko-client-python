@@ -277,12 +277,12 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
             elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
                 program_date = line.split(":", 1)[1]
             elif line.startswith("#EXT-X-MAP:"):
-                map_uri = _attr(line, "URI")
+                map_uri = parse_attribute(line, "URI")
                 map_bad = not map_uri or "BYTERANGE=" in line
             elif line.startswith("#EXT-X-BYTERANGE:"):
                 byte_range = True
             elif line.startswith("#EXT-X-KEY:"):
-                method = _attr(line, "METHOD")
+                method = parse_attribute(line, "METHOD")
                 encrypted = method not in {None, "NONE"}
             elif line.startswith("#EXTINF:"):
                 duration = float(line.split(":", 1)[1].split(",")[0])
@@ -326,12 +326,13 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
 def parse_master_codec(text: str) -> str | None:
     for line in text.splitlines():
         if line.startswith("#EXT-X-STREAM-INF:") and "CODECS=" in line:
-            raw = _attr(line, "CODECS")
+            raw = parse_attribute(line, "CODECS")
             return raw.strip('"') if raw else None
     return None
 
 
-def _attr(line: str, name: str) -> str | None:
+def parse_attribute(line: str, name: str) -> str | None:
+    """`KEY=value` または `KEY="value"` を1行から読む。"""
     marker = f"{name}="
     start = line.find(marker)
     if start < 0:

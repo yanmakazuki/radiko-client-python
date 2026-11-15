@@ -17,7 +17,13 @@ from radiko.catalog import CatalogError, parse_endpoints, parse_stations
 from radiko.chapters import MAX_CHAPTER_BYTES, ChapterError, chapters_from_json
 from radiko.domain import JST, ProgramKey, broadcast_day
 from radiko.fragmented import FragmentedAacDecoder
-from radiko.hls import HlsCursor, parse_media_playlist, segment_discontinuity, segment_schedule
+from radiko.hls import (
+    HlsCursor,
+    parse_attribute,
+    parse_media_playlist,
+    segment_discontinuity,
+    segment_schedule,
+)
 from radiko.http_client import stream_get, transport_overrides
 from radiko.interactive import InteractiveControl
 from radiko.media import AacError, AdtsDecoder, id3_offset
@@ -364,7 +370,7 @@ def inspect_hls(url: str, headers: dict[str, str], retain: bool, cancelled) -> P
 def _session_encrypted(text: str) -> bool:
     for line in text.splitlines():
         if line.startswith("#EXT-X-SESSION-KEY:"):
-            method = _attr(line, "METHOD")
+            method = parse_attribute(line, "METHOD")
             if method not in {None, "NONE"}:
                 return True
     return False
@@ -393,17 +399,17 @@ def _master_target(text: str, base: str) -> tuple[str | None, str]:
     if not variants:
         raise ProbeError("playlist")
     chosen_attr, chosen_uri = min(variants, key=lambda item: _bandwidth(item[0]))
-    codec = _safe_codec(_attr(chosen_attr, "CODECS"))
-    group = _attr(chosen_attr, "AUDIO")
+    codec = _safe_codec(parse_attribute(chosen_attr, "CODECS"))
+    group = parse_attribute(chosen_attr, "AUDIO")
     uri = chosen_uri
     if group:
         for item in alternatives:
             if (
-                _attr(item, "TYPE") == "AUDIO"
-                and _attr(item, "GROUP-ID") == group
-                and _attr(item, "URI")
+                parse_attribute(item, "TYPE") == "AUDIO"
+                and parse_attribute(item, "GROUP-ID") == group
+                and parse_attribute(item, "URI")
             ):
-                uri = _attr(item, "URI") or uri
+                uri = parse_attribute(item, "URI") or uri
                 break
     return codec, _join(base, uri)
 
@@ -420,23 +426,11 @@ def _safe_codec(text: str | None) -> str | None:
 
 
 def _bandwidth(line: str) -> int:
-    raw = _attr(line, "BANDWIDTH") or "0"
+    raw = parse_attribute(line, "BANDWIDTH") or "0"
     try:
         return int(raw)
     except ValueError:
         return 0
-
-
-def _attr(line: str, name: str) -> str | None:
-    marker = f"{name}="
-    start = line.find(marker)
-    if start < 0:
-        return None
-    rest = line[start + len(marker) :]
-    if rest.startswith('"'):
-        end = rest.find('"', 1)
-        return rest[1:end]
-    return rest.split(",", 1)[0]
 
 
 def _join(base: str, uri: str) -> str:
