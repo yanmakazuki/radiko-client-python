@@ -51,7 +51,8 @@ def broadcast_day(now: datetime) -> date:
 class BroadcastStatus:
     """放送前・放送中・放送終了の3値。
 
-    `broadcast_status` が now と開始・終了時刻を比べて決める。放送日は JST 05:00 で切り替わる。
+    `broadcast_status` が now と開始・終了時刻を比べて決める。放送日の境界は
+    `broadcast_day` が JST 05:00 で決める。
     """
 
     UPCOMING = "upcoming"
