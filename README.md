@@ -6,6 +6,19 @@ Rust 版 [radiko-client](https://github.com/yanmakazuki/radiko-client) の Pytho
 
 この移植だけで Findy のスコアが上がることは保証しません。
 
+## 目次
+
+- [必要なもの](#必要なもの)
+- [セットアップ](#セットアップ)
+- [保存](#保存)
+- [音声](#音声)
+- [試験で使うオリジン](#試験で使うオリジン)
+- [コマンド](#コマンド)
+- [アーキテクチャ](docs/architecture.md)
+- [開発への参加](CONTRIBUTING.md)
+- [Rust版との対応](docs/parity.md)
+- [ライセンス](#ライセンス)
+
 ## 必要なもの
 
 - Python 3.12 以降
