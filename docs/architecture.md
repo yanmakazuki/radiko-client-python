@@ -85,6 +85,7 @@ flowchart TB
   tui --> catalog
   tui --> auth
   tui --> storage
+  tui --> http
   programs --> domain
   cli --> programs
   tui --> programs
@@ -129,6 +130,8 @@ flowchart TB
 | 共通 | `radiko.audio` | 出力の型と例外 | `OutputInfo` / `OutputCapability` / `OutputSummary` |
 | 共通 | `radiko.dynamic_library` | ctypes のライブラリ解決と読み込みのキャッシュ | `find_library` / `open_library` |
 | 共通 | `radiko.fixtures` | 試験専用の合成 MP4 / ADTS。本番経路から import しない | `synthetic_fragment` / `encode_adts_sine` |
+
+`__init__.py`（`radiko` / `radiko_client`）と `__main__.py` は省略しています。
 
 ## データの流れ
 
