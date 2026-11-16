@@ -31,6 +31,7 @@ MAX_WRITE_RETRIES = 100
 
 
 def null_sink_enabled() -> bool:
+    """`RADIKO_NULL_SINK=1` ならプロセス内の null sink を使う。"""
     return os.environ.get("RADIKO_NULL_SINK") == "1"
 
 
@@ -44,6 +45,7 @@ def host_backend() -> str:
 
 
 def show_alsa_logs() -> bool:
+    """`RADIKO_ALSA_LOG=1` なら ALSA の診断を標準エラーに残す。"""
     return os.environ.get("RADIKO_ALSA_LOG") == "1"
 
 
@@ -70,6 +72,7 @@ def diagnose_default_output(rate: int) -> OutputCapability:
 
 
 def _supports_f32(rate: int, channels: int) -> bool | None:
+    """指定レート・チャンネルの f32 を ALSA で設定できるか。機器が無ければ None。"""
     opened = _open_default()
     if opened is None:
         return None
@@ -83,10 +86,16 @@ def _supports_f32(rate: int, channels: int) -> bool | None:
 
 
 def _mismatch_none(rate: int) -> str:
+    """機器の対応範囲が無いときの不一致文を返す。"""
     return f"必要な形式は{rate}Hzのmonoまたはstereoのf32・i16・i32です。機器の対応範囲: なし"
 
 
 def inspect_default_output(rate: int) -> OutputInfo:
+    """既定出力機器の対応形式を調べる。
+
+    null sink は f32 stereo。レート範囲外は OutputError("device")、機器なしは
+    "none"、形式が合わなければ sample_format / channels を None にして理由を返す。
+    """
     if not PCM_RATE_MIN <= rate <= PCM_RATE_MAX:
         raise OutputError("device", "サンプルレートは8000〜192000Hzで指定してください")
     if null_sink_enabled():
@@ -108,6 +117,7 @@ class OutputStream:
     """1回開いた出力を複数のチャンクで使い回す。"""
 
     def __init__(self, rate, channels, sample_format, out_channels) -> None:
+        """出力レート・入力/出力チャンネル・サンプル形式とカウンタを初期化する。"""
         self.rate = rate
         self.channels = out_channels
         self.input_channels = channels
@@ -116,31 +126,40 @@ class OutputStream:
         self.underruns = 0
 
     def write(self, samples, volume: int = 100) -> None:
+        """音声を書く。サブクラスが実装する。"""
         raise NotImplementedError
 
     def close(self) -> None:
+        """出力を閉じる。既定では何もしない。"""
         pass
 
     def summary(self) -> OutputSummary:
+        """出力済みフレームとアンダーランを OutputSummary にまとめる。"""
         return OutputSummary(
             self.frames, self.rate, self.channels, self.sample_format, self.underruns
         )
 
     def __enter__(self) -> OutputStream:
+        """with の本体へ自分を返す。"""
         return self
 
     def __exit__(self, *_args) -> None:
+        """with を抜けるときに close する。"""
         self.close()
 
 
 class _NullStream(OutputStream):
+    """プロセス内の null sink。実時間を待たず、渡したフレーム数だけ進む。"""
+
     def __init__(self, rate, channels, stop, paused, step_hook) -> None:
+        """レート・チャンネル・停止/一時停止/ステップフックを保持する。"""
         super().__init__(rate, channels, "f32", channels)
         self.stop = stop or threading.Event()
         self.paused = paused or threading.Event()
         self.step_hook = step_hook
 
     def write(self, samples, volume: int = 100) -> None:
+        """フレーム数を量子（rate/50）ずつ進める。停止・一時停止なら打ち切る。"""
         array = _prepare(samples, volume)
         frames = array.size // self.input_channels
         quantum = max(self.rate // 50, 1)
@@ -156,7 +175,12 @@ class _NullStream(OutputStream):
 
 
 class _AlsaStream(OutputStream):
+    """ALSA の default を開き、選択した形式で書くストリーム。"""
+
     def __init__(self, rate, channels, stop, paused, step_hook) -> None:
+        """default を開いて f32/i32/i16 のいずれかを選ぶ。機器なしは "none"、
+        形式が合わなければ "device"。
+        """
         opened = _open_default()
         if opened is None:
             raise OutputError("none")
@@ -174,6 +198,9 @@ class _AlsaStream(OutputStream):
         self.closed = False
 
     def write(self, samples, volume: int = 100) -> None:
+        """量子ずつ書き、一時停止中は無音を書く。入出力のチャンネル数が違えばリミックスし、
+        部分書き込みと -EPIPE は _write_pcm が処理する。
+        """
         array = _prepare(samples, volume)
         frames = array.size // self.input_channels
         cursor = 0
@@ -198,13 +225,17 @@ class _AlsaStream(OutputStream):
             self.frames += step
 
     def close(self) -> None:
+        """一度だけ ALSA のハンドルを閉じる。"""
         if not self.closed:
             self.closed = True
             _close(self.opened)
 
 
 class _CoreAudioStream(OutputStream):
+    """CoreAudio の Stream を OutputStream として包む。"""
+
     def __init__(self, rate, channels, stop, step_hook) -> None:
+        """AudioQueue の Stream を作る。レート・チャンネル非対応なら OutputError("device")。"""
         info = coreaudio.inspect(rate)
         if info.sample_format is None or info.channels is None:
             raise OutputError("device", info.mismatch)
@@ -212,6 +243,7 @@ class _CoreAudioStream(OutputStream):
         super().__init__(rate, channels, "f32", info.channels)
 
     def write(self, samples, volume: int = 100) -> None:
+        """入力を出力チャンネル数にリミックスし、Stream へ書く。"""
         array = np.asarray(samples, dtype=np.float32).reshape(-1)
         frames = array.size // self.input_channels if self.input_channels else 0
         if self.input_channels and self.input_channels != self.channels:
@@ -220,12 +252,17 @@ class _CoreAudioStream(OutputStream):
         self.frames = self.stream.queued_frames
 
     def close(self) -> None:
+        """Stream を閉じ、再生済みフレームを確定する。"""
         self.stream.close()
         self.frames = self.stream.played_frames
         self.underruns = 0
 
 
 def open_stream(rate: int, channels: int, stop=None, paused=None, step_hook=None) -> OutputStream:
+    """バックエンドを選んでストリームを開く。
+
+    null sink → CoreAudio → ALSA の順。未対応 OS は OutputError("none")。
+    """
     if null_sink_enabled():
         return _NullStream(rate, channels, stop, paused, step_hook)
     backend = host_backend()
@@ -237,6 +274,7 @@ def open_stream(rate: int, channels: int, stop=None, paused=None, step_hook=None
 
 
 def probe_tone(seconds: int) -> OutputSummary:
+    """440Hz・振幅0.2の生成音を1〜10秒出す。秒数が不正なら OutputError("pcm")。"""
     if not 1 <= seconds <= 10:
         raise OutputError("pcm", "出力用PCMまたは再生時間が不正です")
     rate = 48000
@@ -249,6 +287,9 @@ def probe_tone(seconds: int) -> OutputSummary:
 
 
 def probe_silent(seconds: int, stop, on_progress=None) -> OutputSummary:
+    """無音を1〜1800秒出す。5秒ごとに on_progress を呼び、停止で打ち切る。
+    秒数が不正なら OutputError("device")。
+    """
     if not 1 <= seconds <= 1800:
         raise OutputError("device", "無音の出力診断は1〜1800秒で指定してください")
     rate = 48000
@@ -283,12 +324,14 @@ def play_samples(
 
 
 def _prepare(samples, volume: int) -> np.ndarray:
+    """入力を f32 にそろえ、音量 0〜100% を掛ける。"""
     array = np.asarray(samples, dtype=np.float32).reshape(-1)
     gain = max(0, min(volume, 100)) / 100
     return array if gain == 1.0 else array * gain
 
 
 def _remix(block, src: int, dst: int, frames: int) -> np.ndarray:
+    """チャンネル数を変換する。mono は平均、stereo 化は複製、それ以外は先頭 dst 本を使う。"""
     array = np.asarray(block, dtype=np.float32).reshape(frames, src)
     if dst == 1:
         output = array.mean(axis=1, dtype=np.float32)
@@ -300,6 +343,7 @@ def _remix(block, src: int, dst: int, frames: int) -> np.ndarray:
 
 
 def _alsa():
+    """libasound を読み、ctypes 署名を付けて返す。見つからなければ None。"""
     path = find_library("asound")
     if not path:
         return None
@@ -309,6 +353,7 @@ def _alsa():
 
 
 def _bind_alsa(library) -> None:
+    """ALSA の関数に ctypes の argtypes/restype を設定する。設定済みなら何もしない。"""
     if getattr(library, "_radiko_signed", False):
         return
     library.snd_pcm_open.argtypes = [
@@ -346,6 +391,7 @@ _FORMATS = (("f32", 14), ("i32", 10), ("i16", 2))
 
 
 def _open_default():
+    """ALSA の default を開き、(library, handle) を返す。失敗は None。"""
     library = _alsa()
     if library is None:
         return None
@@ -358,11 +404,15 @@ def _open_default():
 
 
 def _close(opened) -> None:
+    """ALSA の PCM ハンドルを閉じる。"""
     library, handle = opened
     library.snd_pcm_close(handle)
 
 
 def _select_format(opened, rate: int):
+    """f32 → i32 → i16、各2ch → 1ch の順に設定を試し、最初に通った (形式, ch) を返す。
+    全滅なら None。
+    """
     library, handle = opened
     for name, code in _FORMATS:
         for channels in (2, 1):
@@ -444,6 +494,7 @@ def _silence(size: int) -> np.ndarray:
 
 
 def _write_silence(opened, sample_format: str, channels: int, frames: int) -> tuple[int, int]:
+    """指定フレーム分の無音を _write_pcm で書く。"""
     return _write_pcm(opened, _silence(frames * channels), sample_format, channels)
 
 
@@ -453,6 +504,7 @@ _ALSA_ERROR = ctypes.CFUNCTYPE(
 
 
 def _alsa_noop(*_args) -> None:
+    """ALSA のエラーハンドラ用の何もしない関数。"""
     return
 
 
@@ -461,6 +513,7 @@ _ALSA_ERROR_HANDLER = _ALSA_ERROR(_alsa_noop)
 
 @contextmanager
 def _silence_alsa(library):
+    """ALSA のエラー出力を抑える context manager。`RADIKO_ALSA_LOG=1` ならそのまま流す。"""
     if show_alsa_logs():
         yield
         return
