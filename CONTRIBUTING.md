@@ -110,3 +110,11 @@ Rust 版 `yanmakazuki/radiko-client` の `a7eaefa56729161e449a03ab2c0d2872429d8e
 - `src/radiko` は端末に依存させません。CLI / TUI の都合は `src/radiko_client` に置きます。
 - 関数内 import は使いません。循環を避けるときはモジュール境界を見直します。
 - docstring とコメントは日本語、識別子は英語です。
+
+## docstringとコメント
+
+- docstring は日本語で1〜3行にします。
+- 公開 API は、引数・戻り値・送出する例外が分かるように書きます。
+- コメントは「なぜ」を書きます。「何を」はコードで読めるなら書きません。
+- 明白な代入や自明な if にはコメントを付けません。
+- 参考例: [`src/radiko/domain.py`](src/radiko/domain.py) の `Filter` / `SearchCriteria` / `BroadcastStatus`。
