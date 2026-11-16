@@ -75,7 +75,7 @@ FIELD_LIMITS = [8, 8, 512, 4096, 4096, 1024]
 
 
 def _classes(ids: list[str], empty: bool) -> str:
-    """分類IDを表示用にカンマで連結する。`empty` なら「未分類」を末尾に足し、1件も無ければ「指定なし」。"""
+    """分類IDを表示用にカンマで連結する。`empty` なら「未分類」を足し、それも無ければ「指定なし」。"""
     names = list(ids)
     if empty:
         names.append("未分類")
@@ -159,7 +159,7 @@ class FilterForm:
         return rows
 
     def line(self) -> str:
-        """F2 の選択ダイアログの本文。picker 中は候補と操作説明、通常は6項目と未分類の状態を並べる。"""
+        """F2 の選択ダイアログの本文。picker 中は候補と操作説明、通常は6項目・未分類2つ・観測した分類を並べる。"""
         if self.picker is not None:
             body = "\n".join(self.picker_rows())
             hint = "上下 選択 / Space 切替 / Enter 条件へ反映（検索しません） / Esc 取消"
@@ -306,7 +306,7 @@ class LineEditor:
             )
 
     def _insert(self, char: str, raw: bytes | None = None) -> bool:
-        """カーソル位置に1文字を挿入する。バイト上限とスカラー上限を超えるなら
+        """カーソル位置に1文字を挿入する。`byte_limit` と `scalar_limit` を超えるなら
         何もせず False。cursor は挿入したバイト数だけ進める。
         """
         encoded = char.encode()
