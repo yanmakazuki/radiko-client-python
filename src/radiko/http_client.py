@@ -189,7 +189,7 @@ def _request(
                     attempt += 1
                     continue
                 raise
-        # 408 と 5xx は同じ URL でやり直す。4xx は再試行しても結果が変わらない。
+        # 408 と 5xx は同じ URL でやり直す。408 を除く 4xx は再試行しても結果が変わらない。
         elif (status == 408 or 500 <= status <= 599) and attempt < retries and not cancelled():
             _backoff(attempt, cancelled, record_delays)
             attempt += 1
