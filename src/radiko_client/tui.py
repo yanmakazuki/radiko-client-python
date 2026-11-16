@@ -75,6 +75,7 @@ FIELD_LIMITS = [8, 8, 512, 4096, 4096, 1024]
 
 
 def _classes(ids: list[str], empty: bool) -> str:
+    """分類IDを表示用にカンマで連結する。`empty` なら「未分類」を末尾に足し、1件も無ければ「指定なし」。"""
     names = list(ids)
     if empty:
         names.append("未分類")
@@ -82,6 +83,7 @@ def _classes(ids: list[str], empty: bool) -> str:
 
 
 def criteria_scope(criteria: SearchCriteria) -> str:
+    """検索範囲を表示用の文字列にする。全国・局ID・地域IDの並びを、保存形式ではなく画面の言葉で返す。"""
     scope = criteria.scope
     if scope.kind == "nationwide":
         return "全国"
@@ -123,16 +125,21 @@ class FilterForm:
     )
 
     def field(self, index: int) -> LineEditor:
+        """focus の並び（開始・終了・範囲・ジャンル・出演者・キーワード）で入力欄を返す。"""
         return (self.start, self.end, self.scope, self.genres, self.personalities, self.keyword)[
             index
         ]
 
     def set_field(self, index: int, text: str) -> None:
+        """入力欄の値を差し替え、カーソルを UTF-8 バイト列の末尾へ置く。"""
         editor = self.field(index)
         editor.value = text
         editor.cursor = len(text.encode())
 
     def picker_rows(self) -> list[str]:
+        """F2 の地域・分類選択に出す行を作る。局一覧では選択行に > を付け、分類では
+        「全て」「未分類」と各IDのチェック状態を表す。picker が無ければ空。
+        """
         if self.picker is None:
             return []
         if self.picker_ids is None:
@@ -152,6 +159,7 @@ class FilterForm:
         return rows
 
     def line(self) -> str:
+        """F2 の選択ダイアログの本文。picker 中は候補と操作説明、通常は6項目と未分類の状態を並べる。"""
         if self.picker is not None:
             body = "\n".join(self.picker_rows())
             hint = "上下 選択 / Space 切替 / Enter 条件へ反映（検索しません） / Esc 取消"
@@ -174,6 +182,9 @@ class FilterForm:
         return f"{body}\n{self.error}\n{hint}"
 
     def criteria(self) -> SearchCriteria:
+        """入力欄から検索条件を組み立てる。終了日が空なら開始日と同じ1日、範囲は
+        「全国」「局:ID」「地域IDのカンマ区切り」を受け付ける。
+        """
         start = parse_day(self.start.value)
         end = start if not self.end.value.strip() else parse_day(self.end.value.strip())
         scope_text = self.scope.value.strip()
@@ -205,6 +216,9 @@ class FilterForm:
 
 @functools.lru_cache(maxsize=1)
 def help_text() -> str:
+    """同梱の help_text.txt を読む。開発ツリーでは隣のファイル、配布時はパッケージ資源を使い、
+    lru_cache で1回だけ読む。
+    """
     path = Path(__file__).with_name("help_text.txt")
     if path.exists():
         return path.read_text()
@@ -212,6 +226,7 @@ def help_text() -> str:
 
 
 def no_color_enabled(value: str | None) -> bool:
+    """NO_COLOR が空でない値なら True。値の内容（"0" など）は見ない。"""
     return value is not None and value != ""
 
 
@@ -222,6 +237,7 @@ class NoticeLevel:
 
     @staticmethod
     def rank(level: str) -> int:
+        """通知の重要度。INFO < WARNING < ERROR の順で、数値が大きいほど強い。"""
         return {NoticeLevel.INFO: 0, NoticeLevel.WARNING: 1, NoticeLevel.ERROR: 2}[level]
 
 
@@ -242,9 +258,13 @@ class LineEditor:
 
     @classmethod
     def new(cls, value: str, byte_limit: int) -> LineEditor:
+        """値を末尾カーソルで初期化する。cursor は UTF-8 のバイト位置で持つ。"""
         return cls(value, len(value.encode()), byte_limit)
 
     def handle(self, key: str) -> None:
+        """編集キーを1つ適用する。カーソルは書記素クラスタの境界へ丸め、
+        値が変わったときだけ境界を取り直して隣のクラスタとの融合に追従する。
+        """
         points = _boundaries(self.value)
         self.cursor = _snap_points(points, self.cursor)
         raw = self.value.encode()
@@ -286,6 +306,9 @@ class LineEditor:
             )
 
     def _insert(self, char: str, raw: bytes | None = None) -> bool:
+        """カーソル位置に1文字を挿入する。バイト上限とスカラー上限を超えるなら
+        何もせず False。cursor は挿入したバイト数だけ進める。
+        """
         encoded = char.encode()
         if raw is None:
             raw = self.value.encode()
@@ -298,6 +321,9 @@ class LineEditor:
         return True
 
     def view(self, columns: int) -> tuple[str, int]:
+        """指定桁数に収まる表示文字列と、その中のカーソル桁を返す。
+        カーソルが見えるよう開始クラスタをずらし、桁は columns-1 を上限にする。
+        """
         if columns <= 0:
             return self.value, 0
         clusters = graphemes(self.value)
@@ -326,6 +352,7 @@ class LineEditor:
 
 
 def _boundaries(value: str) -> list[int]:
+    """書記素クラスタの境界を UTF-8 バイト位置の昇順で返す。先頭0と末尾の長さを含む。"""
     points = [0]
     for cluster in graphemes(value):
         points.append(points[-1] + len(cluster.encode()))
@@ -333,20 +360,24 @@ def _boundaries(value: str) -> list[int]:
 
 
 def _snap_points(points: list[int], cursor: int) -> int:
+    """カーソルに最も近い境界を返す。同距離なら小さい方（前）を選ぶ。"""
     return min(points, key=lambda point: (abs(point - cursor), point))
 
 
 def _snap(value: str, cursor: int) -> int:
+    """値の書記素境界のうち、cursor に最も近いバイト位置を返す。"""
     points = _boundaries(value)
     return _snap_points(points, cursor)
 
 
 def _previous(value: str, cursor: int) -> int:
+    """cursor より前の直近の書記素境界を返す。無ければ0。"""
     points = [point for point in _boundaries(value) if point < cursor]
     return points[-1] if points else 0
 
 
 def _next(value: str, cursor: int) -> int:
+    """cursor より後ろの直近の書記素境界を返す。無ければ末尾のバイト位置。"""
     for point in _boundaries(value):
         if point > cursor:
             return point
@@ -354,6 +385,7 @@ def _next(value: str, cursor: int) -> int:
 
 
 def hint(width: int) -> str:
+    """幅に収まる範囲で HINT_ITEMS を先頭から連結する。1つも入らなければ空文字。"""
     chosen = 0
     for count in range(1, len(HINT_ITEMS) + 1):
         candidate = " / ".join(HINT_ITEMS[:count])
@@ -365,6 +397,9 @@ def hint(width: int) -> str:
 
 
 def playback_line(identity: str, state: str, clock: str, width: int) -> str:
+    """再生中の行を作る。幅に収まらなければ時計、状態、局名の順に落とし、
+    局名だけでも入らなければ空文字。
+    """
     with_state = identity if not state else f"{identity} {state}"
     full = with_state if not clock else f"{with_state} / {clock}"
     if display_width(full) <= width:
@@ -377,6 +412,9 @@ def playback_line(identity: str, state: str, clock: str, width: int) -> str:
 
 
 def wrap_display(text: str, width: int) -> list[str]:
+    """表示幅で折り返す。書記素クラスタの途中では切らず、幅0は折り返さず1行、
+    空文字は空行1行にする。
+    """
     if text == "":
         return [""]
     if width == 0:
@@ -397,11 +435,15 @@ def wrap_display(text: str, width: int) -> list[str]:
 
 
 def _clock(seconds: float) -> str:
+    """秒を mm:ss にする。負の値は0として扱う。"""
     total = max(int(seconds), 0)
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def truncate_width(text: str, width: int) -> str:
+    """表示幅に切り詰める。ASCII は1文字1桁として速く処理し、それ以外は
+    書記素クラスタ単位で、幅を超えるクラスタの手前まで残す。
+    """
     if width <= 0:
         return ""
     if text.isascii() and text.isprintable():
@@ -417,6 +459,9 @@ def truncate_width(text: str, width: int) -> str:
 
 
 def offline_programs(station: str, day) -> list[Program]:
+    """オフライン表示用の1枠だけの番組表を作る。局IDを検証し、当日06:00〜07:00の
+    固定番組を通常のXML解析に通す。
+    """
     validate_station(station)
     stamp = day.strftime("%Y%m%d")
     xml = (
@@ -429,6 +474,7 @@ def offline_programs(station: str, day) -> list[Program]:
 
 
 def split_args(args: list[str]) -> tuple[bool, list[str]]:
+    """--offline を取り出し、(オフラインか, 残りの引数) を返す。"""
     return any(arg == "--offline" for arg in args), [arg for arg in args if arg != "--offline"]
 
 
@@ -1704,6 +1750,7 @@ def _check_auth(data_dir: Path | None) -> tuple[str, str, bool]:
         return "signed-out", str(error), True
 
     def label(value: bool | None) -> str:
+        """真偽値と未確認を「あり」「なし」「未確認」に分ける。"""
         if value is True:
             return "あり"
         if value is False:
@@ -1726,6 +1773,7 @@ def _start_auth(screen: Screen, show_notice: bool) -> None:
     screen.auth_box = box
 
     def work() -> None:
+        """別スレッドでセッションを確認し、世代と結果（ok/err）をキューへ入れる。"""
         try:
             box.put((generation, ("ok", _check_auth(screen.data_dir), show_notice)))
         except Exception as error:
@@ -1735,6 +1783,9 @@ def _start_auth(screen: Screen, show_notice: bool) -> None:
 
 
 def poll_auth(screen: Screen) -> None:
+    """認証確認の結果を1件だけ取り込む。世代が古ければ捨て、現在の世代なら
+    auth と通知を更新して revision を進める。
+    """
     box = screen.auth_box
     if box is None:
         return
@@ -1759,6 +1810,7 @@ def poll_auth(screen: Screen) -> None:
 
 
 def wait_auth(screen: Screen, timeout: float = 8.0) -> None:
+    """認証確認が終わるか timeout まで poll_auth を回す。最後にもう一度取り込む。"""
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         poll_auth(screen)
@@ -1769,6 +1821,9 @@ def wait_auth(screen: Screen, timeout: float = 8.0) -> None:
 
 
 def _fetch_programs(criteria: SearchCriteria, cancel) -> dict:
+    """条件に合う番組表を取得する。局指定なら1局、それ以外は地域（全国ならJP1〜47）を
+    まとめ、フィルタ後の番組と失敗・不正件数を返す。
+    """
     client = catalog.CatalogClient(catalog_fetch)
     scope = criteria.scope
     if scope.kind == "station" and isinstance(scope.value, str):
@@ -1806,6 +1861,7 @@ def _fetch_programs(criteria: SearchCriteria, cancel) -> dict:
 
 
 def _pump(box) -> str | None:
+    """再生ジョブの操作キューを非ブロッキングで1件読む。無ければ None。"""
     if box is None:
         return None
     try:
@@ -1815,6 +1871,9 @@ def _pump(box) -> str | None:
 
 
 def _start_job(screen: Screen, kind: str, payload) -> None:
+    """進行中のジョブをキャンセルし、世代を進めて別スレッドで開始する。
+    kind は fetch / chapters / play で、play だけ操作キューを持つ。
+    """
     previous = screen.job_cancel
     if previous is not None:
         previous.set()
@@ -1829,6 +1888,9 @@ def _start_job(screen: Screen, kind: str, payload) -> None:
     screen.play_commands = commands_box
 
     def work() -> None:
+        """ジョブを実行し、(世代, 結果, 例外) をキューへ入れる。kind ごとに取得・
+        チャプター・再生を呼び分ける。
+        """
         try:
             result: tuple[str, object]
             if kind == "fetch":
@@ -1881,6 +1943,9 @@ def _is_cancelled_error(error: object) -> bool:
 
 
 def poll_jobs(screen: Screen) -> None:
+    """現在の世代のジョブ結果を1件取り込み、番組・チャプター・再生状態へ反映する。
+    キャンセル由来の例外は通知しない。
+    """
     box = screen.job_box
     if box is None:
         return
@@ -1928,6 +1993,7 @@ def poll_jobs(screen: Screen) -> None:
 
 
 def wait_jobs(screen: Screen, timeout: float = 8.0) -> None:
+    """ジョブのスレッドが終わるか timeout まで poll_jobs を回す。最後にもう一度取り込む。"""
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         poll_jobs(screen)
@@ -1964,6 +2030,9 @@ def startup_state(args: list[str], data_dir: Path | None, now: datetime, offline
 
 
 def run(args: list[str], data_dir: Path | None) -> None:
+    """TUI の入口。引数を検証して対話端末か確認し、条件を復元してループを回す。
+    終了時は最後の条件を保存する。
+    """
     offline, rest = split_args(args)
     if rest == ["--help"]:
         stdout_ln(USAGE)
@@ -2005,6 +2074,9 @@ def run(args: list[str], data_dir: Path | None) -> None:
 
 
 def _terminal_loop(screen: Screen) -> None:
+    """端末を raw モードと代替画面にして service_loop を回す。終了時は SIGINT・
+    画面・端末属性を必ず元へ戻す。
+    """
     fd = sys.stdin.fileno()
     previous = termios.tcgetattr(fd)
     before = signal.getsignal(signal.SIGINT)
@@ -2022,6 +2094,7 @@ def _terminal_loop(screen: Screen) -> None:
 
 
 def _paint(screen: Screen) -> None:
+    """カーソルを左上へ戻し、render の各行を前の行の残りを消しながら書く。"""
     sys.stdout.write("\x1b[H")
     for line in screen.render():
         sys.stdout.write(line + "\x1b[K\n")
@@ -2046,6 +2119,7 @@ def service_loop(screen: Screen, read_key, paint=None) -> None:
 
 
 def _read_raw(timeout: float | None) -> bytes | None:
+    """標準入力から1バイト読む。timeout 付きなら select で待ち、無ければ None。"""
     fd = sys.stdin.fileno()
     if timeout is not None and not select.select([fd], [], [], timeout)[0]:
         return None
@@ -2057,6 +2131,9 @@ def _read_raw(timeout: float | None) -> bytes | None:
 
 
 def _read_key(timeout: float | None = None) -> str | None:
+    """キーを1つ読んで名前へ変換する。UTF-8 の継続バイトは20msまで待って集め、
+    エスケープシーケンスは矢印・Home/End・F2 を解釈する。
+    """
     raw = _read_raw(timeout)
     if not raw:
         return None
