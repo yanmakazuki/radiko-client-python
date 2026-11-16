@@ -285,8 +285,9 @@ def parse_endpoints(data: bytes, timefree: bool, outside: bool) -> list[str]:
     """配信先 XML から、モードと地域に合う `playlist_create_url` を返す。
 
     `areafree` と `timefree` が指定に一致する `<url>` だけを対象にし、URL は
-    `trusted()` を通す（通らなければ ProbeError("unsafe")）。重複は除き、該当が
-    無ければ ValueError。XML 不正も ValueError。
+    `trusted()` を通す（通らなければ ProbeError("unsafe")）。空の
+    `playlist_create_url` の `<url>` は読み飛ばし、1件も残らなければ ValueError。
+    重複は除く。XML 不正も ValueError。
     """
     try:
         root = ET.fromstring(data.decode())
@@ -513,7 +514,7 @@ def decode_body(data: bytes, encoding: str | None) -> bytes:
 
 
 def _gunzip_bounded(data: bytes) -> bytes:
-    """上限を超えた時点で展開を止め、4MB 以上のバッファを確保しない。"""
+    """上限（4MB）を超えた時点で展開を止める。ちょうど4MBまでは許す。"""
     if not data:
         raise CatalogError("xml")
     output = bytearray()
