@@ -24,6 +24,6 @@ macOS では AudioQueue を使い、インターリーブの f32 を出します
 ## 結果
 
 - macOS の出力は f32 の mono / stereo のみです。デバイス名は制御文字を落とし、256文字で切ります。
-- コールバックの寿命、停滞検知、バッファ再利用、mono から stereo への変換は、偽の AudioToolbox を使ったテストで確認します。実機の再生は未検証で、macOS CI でも実音声は出しません。
+- コールバックの寿命、停滞検知、バッファ再利用、mono から stereo への変換は、偽の AudioToolbox を使ったテストで確認します。実機の再生は未検証です。macOS CI のテストは偽の AudioToolbox を使い、実音声を出しません。
 - 実装は [coreaudio.py](../../src/radiko/coreaudio.py) と [output.py](../../src/radiko/output.py) にあります。テストは [test_coreaudio_backend.py](../../tests/test_coreaudio_backend.py) です。
 - 差と未検証事項は [parity.md](../parity.md) と [README.md](../../README.md) の「既知の制約」に記録しています。
