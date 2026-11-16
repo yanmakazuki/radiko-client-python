@@ -174,6 +174,7 @@ def _request(
                 record_delays=record_delays,
             )
         except ProbeError as error:
+            # 通信断は再試行。キャンセル済みなら待たずに送出する。
             if _retryable(error) and attempt < retries and not cancelled():
                 _backoff(attempt, cancelled, record_delays)
                 attempt += 1
@@ -188,6 +189,7 @@ def _request(
                     attempt += 1
                     continue
                 raise
+        # 408 と 5xx は同じ URL でやり直す。4xx は再試行しても結果が変わらない。
         elif (status == 408 or 500 <= status <= 599) and attempt < retries and not cancelled():
             _backoff(attempt, cancelled, record_delays)
             attempt += 1
@@ -270,6 +272,7 @@ def _exchange(
     retry_stale: bool,
     record_delays: bool,
 ) -> tuple[int, dict[str, str], bytes]:
+    # GET だけ接続の使い回しで切れた場合に1回やり直す。POST は二重送信を避けて再送しない。
     attempts = 2 if retry_stale else 1
     for attempt in range(attempts):
         key = _key(url)
