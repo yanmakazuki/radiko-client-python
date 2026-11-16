@@ -23,22 +23,27 @@ class MemberSession:
     """再利用できるセッショントークンだけを持つ。パスワードは持たない。"""
 
     def __init__(self, token: str) -> None:
+        """トークンを検証して保持する。不正なら ValueError("セッション形式が不正です")。"""
         if not _valid_token(token):
             raise ValueError("セッション形式が不正です")
         self._token = token
 
     @property
     def token(self) -> str:
+        """保存・認証に使うトークン。`repr` には出さない。"""
         return self._token
 
     def __repr__(self) -> str:
+        """トークンを伏せた表現を返す。"""
         return "MemberSession([REDACTED])"
 
     def to_dict(self) -> dict:
+        """保存用の辞書にする。キーは `token` だけ。"""
         return {"token": self._token}
 
 
 def _valid_token(token: str) -> bool:
+    """Cookie として送れる ASCII トークンか。1〜4096バイト、制御文字と区切り文字を拒否。"""
     if not token or len(token.encode()) > 4096:
         return False
     try:
@@ -49,11 +54,17 @@ def _valid_token(token: str) -> bool:
 
 
 class Membership:
+    """会員の聴取可否。`area_free` はエリア外聴取、`time_free_30` は30日間の
+    タイムフリー。不明は None。
+    """
+
     def __init__(self, area_free: bool | None, time_free_30: bool | None) -> None:
+        """2つの可否を保持する。値は True / False / None（未確認）。"""
         self.area_free = area_free
         self.time_free_30 = time_free_30
 
     def __eq__(self, other: object) -> bool:
+        """2つの可否が同じなら等しい。"""
         return (
             isinstance(other, Membership)
             and self.area_free == other.area_free
@@ -62,13 +73,20 @@ class Membership:
 
 
 class StorageError(Exception):
+    """session.json の読み書き失敗。`code` と `detail` から表示文を作る。
+
+    code は io / invalid / version / permissions / path / nodir。
+    """
+
     def __init__(self, code: str, detail: str = "") -> None:
+        """code と detail を保持し、表示文を例外メッセージにする。"""
         self.code = code
         self.detail = detail
         super().__init__(self.text)
 
     @property
     def text(self) -> str:
+        """code に対応する利用者向けの文言。未知の code は汎用の失敗文。"""
         if self.code == "io":
             return f"セッションファイルの操作に失敗しました ({self.detail})"
         if self.code == "invalid":
@@ -85,12 +103,19 @@ class StorageError(Exception):
 
 
 class SearchError(Exception):
+    """searches.json の読み書き失敗。名前・件数・ロックの失敗も表す。
+
+    code は name / missing / many / storage。storage のときは元の StorageError を持つ。
+    """
+
     def __init__(self, code: str, storage: StorageError | None = None) -> None:
+        """code と、storage 失敗なら元の StorageError を保持する。"""
         self.code = code
         self.storage = storage
         super().__init__(str(self))
 
     def __str__(self) -> str:
+        """code（と元の StorageError）に対応する利用者向けの文言。"""
         if self.code == "name":
             return "条件名は前後空白・制御文字なしの1〜64文字で指定してください"
         if self.code == "missing":
@@ -116,6 +141,10 @@ class SearchError(Exception):
 
 
 def io_kind(error: OSError) -> str:
+    """OSError を保存層の短い分類に変える。
+
+    NotFound / PermissionDenied / WouldBlock / StorageFull、該当しなければ例外クラス名。
+    """
     if isinstance(error, FileNotFoundError) or error.errno == errno.ENOENT:
         return "NotFound"
     if isinstance(error, PermissionError) or error.errno == errno.EACCES:
@@ -139,20 +168,26 @@ def default_data_dir() -> Path:
 
 
 class DataDir:
+    """データ保存先のディレクトリ。session と searches のストアを作る。"""
+
     def __init__(self, directory: Path) -> None:
+        """保存先ディレクトリを受け取る。作成はしない。"""
         self.directory = directory
 
     @classmethod
     def default(cls) -> DataDir:
+        """既定の保存先を返す。解決できない場合は StorageError("nodir")。"""
         try:
             return cls(default_data_dir())
         except OSError as error:
             raise StorageError("nodir") from error
 
     def sessions(self) -> SessionStore:
+        """このディレクトリを使う SessionStore を返す。"""
         return SessionStore(self.directory)
 
     def searches(self) -> SearchStore:
+        """このディレクトリを使う SearchStore を返す。"""
         return SearchStore(self.directory)
 
 
@@ -247,9 +282,12 @@ class SessionStore:
 
 
 class Library:
+    """searches.json の中身。直近条件と、名前付き条件の辞書。"""
+
     def __init__(
         self, last: SearchCriteria | None = None, named: dict[str, SearchCriteria] | None = None
     ):
+        """直近条件と名前付き条件を保持する。named の既定は空。"""
         self.last = last
         self.named = named or {}
 
