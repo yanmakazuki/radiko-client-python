@@ -99,6 +99,11 @@ CHAPTERS_USAGE = "chapters STATION YYYYMMDDHHmmss（日本時間、取得・一�
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI の入口。引数を省略すると `sys.argv[1:]` を使う。
+
+    `run` の例外は stderr に「エラー: …」と出して 1、壊れたパイプは 141、
+    正常終了は 0 を返す。
+    """
     try:
         run(sys.argv[1:] if argv is None else argv)
     except (ClosedPipe, BrokenPipeError):
@@ -122,6 +127,11 @@ def _silence_stdout() -> None:
 
 
 def run(argv: list[str]) -> None:
+    """`--data-dir` を分離し、サブコマンドへ振り分ける。
+
+    引数なし・`--help` は全体の使い方を stdout に出す。未知のコマンドや個数違反は
+    RuntimeError。`--data-dir` は tui / searches / programs / login 系 / 再生系で使う。
+    """
     args, data_dir = split_data_dir(argv)
     if not args or args == ["--help"]:
         stdout_ln(TOP)
@@ -165,6 +175,10 @@ def run(argv: list[str]) -> None:
 
 
 def split_data_dir(args: list[str]) -> tuple[list[str], Path | None]:
+    """`--data-dir DIR` を1回だけ取り出し、(残りの引数, Path または None) を返す。
+
+    2回目・値なし・空文字・`--` で始まる値は RuntimeError。
+    """
     data_dir = None
     kept: list[str] = []
     index = 0
@@ -186,18 +200,25 @@ def split_data_dir(args: list[str]) -> tuple[list[str], Path | None]:
 
 
 def _session_store(data_dir: Path | None) -> SessionStore:
+    """SessionStore を返す。`--data-dir` が無ければ既定の保存先を使う。"""
     if data_dir is not None:
         return SessionStore(data_dir)
     return SessionStore.default()
 
 
 def _search_store(data_dir: Path | None) -> SearchStore:
+    """SearchStore を返す。`--data-dir` が無ければ既定のデータ保存先を使う。"""
     if data_dir is not None:
         return SearchStore(data_dir)
     return SearchStore(DataDir.default().directory)
 
 
 def inspect_chapters(args: list[str]) -> None:
+    """`inspect-chapters FILE SLOT_SECONDS VERIFIED_OFFSET_SECONDS` を実行する。
+
+    ローカル JSON を解析し、チャプター・不正件数・楽曲除外数を stdout に出す。
+    通信も聴取権限の確認もしない。数値やファイル読み込みの失敗は RuntimeError。
+    """
     if args[2] != args[2].strip():
         raise RuntimeError("放送枠の秒数が不正です")
     try:
@@ -229,16 +250,24 @@ def inspect_chapters(args: list[str]) -> None:
 
 
 def _sigint_stop(stop):
+    """SIGINT を `stop.set()` に差し替え、元のハンドラを返す。"""
     previous = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, lambda *_args: stop.set())
     return previous
 
 
 def _restore_sigint(previous) -> None:
+    """`_sigint_stop` が返した元の SIGINT ハンドラに戻す。"""
     signal.signal(signal.SIGINT, previous)
 
 
 def member_command(command: str, store: SessionStore) -> None:
+    """`login` / `session` / `logout` を実行する。
+
+    logout は保存セッションを削除。session は保存済みセッションの有効性と契約を表示。
+    login は対話端末でメールと非表示パスワードを受け取り、保存して契約を表示する。
+    セッションの読み込み失敗はファイルを残したまま未ログインとして扱う。
+    """
     if command == "logout":
         store.delete()
         stdout_ln("ローカルのセッションを削除しました")
@@ -273,6 +302,8 @@ def member_command(command: str, store: SessionStore) -> None:
 
 
 def _print_membership(membership) -> None:
+    """契約を「ログイン有効 / エリアフリー: あり|なし|未確認 / タイムフリー30: …」で出す。"""
+
     def label(value):
         if value is True:
             return "あり"
@@ -287,6 +318,11 @@ def _print_membership(membership) -> None:
 
 
 def output_info(args: list[str]) -> None:
+    """`output-info [SAMPLE_RATE]` を実行する。
+
+    8000〜192000Hz（既定48000）の既定出力機器を読み、名前と対応宣言または不一致理由を
+    stdout に出す。音声は出さない。`--help` は使い方だけを出す。
+    """
     usage = "output-info [SAMPLE_RATE]（8000〜192000Hz・既定48000Hz、出力機器の読み取りのみ）"
     if args == ["output-info", "--help"]:
         stdout_ln(usage)
@@ -322,6 +358,11 @@ def output_info(args: list[str]) -> None:
 
 
 def probe_output(args: list[str]) -> None:
+    """`probe-output [SECONDS]` または `probe-output --mute [SECONDS]` を実行する。
+
+    生成音は1〜10秒（既定2）、無音は1〜1800秒（既定30）。無音は SIGINT で中断でき、
+    進捗は stderr、結果は stdout に出す。
+    """
     if len(args) == 2 and args[1] == "--help":
         stdout_ln(
             "probe-output [SECONDS]（生成音・1〜10秒・既定2秒）\n"
