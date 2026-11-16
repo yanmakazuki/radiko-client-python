@@ -76,7 +76,18 @@
 - 音声出力の型（`OutputError` / `OutputInfo` / `OutputCapability` / `OutputSummary`）は `radiko.audio`。`radiko.output` と `radiko.coreaudio` は同じ型を共有し、`radiko.output` は後方互換のため再エクスポートする。
 - 試験用の合成データ（`box` / `words` / `synthetic_init` / `synthetic_fragment` / `encode_adts_sine`）は `radiko.fixtures` にだけ置く。本番の `fragmented` / `media` は持たない。
 - `programs` の引数解析と検索条件は `radiko_client.programs` に集約し、CLI と TUI が同じ実装を使う。簡易再生エンジン `radiko.player` は削除した。
+- `radiko.dynamic_library` は ctypes のライブラリ解決と読み込みをキャッシュする。`find_library` は名前ごと、`open_library` はパスごとに1つだけ返す。
+- `radiko.fragmented` の fMP4 解析は `_parse_tfhd` / `_parse_tfdt` / `_parse_trun` に分かれる。`radiko.prepare` の `_decode_segment` は1セグメントの復号・トリム・limit 判定を担う。
+- `radiko.prepare._sample` は取得（`_fetch_sample_blob`）・復号（`_decode_sample`）・レポート組み立てに分かれる。`radiko_client.tui.Screen.handle` は移動系を `_move_selection`、一覧操作を `_list_action` に分ける。
 - 関数内 import は無い。`tests/test_p3_cleanup.py` が固定する。
+
+## CI
+
+GitHub Actions は3ジョブで構成する。Linux の Ubuntu checks を最終根拠にする。
+
+- **Ubuntu checks**: `ruff format --check src tests`、`ruff check src tests`、`python -m mypy src`、`pytest --cov --cov-report=term-missing`。カバレッジの下限は75%。ホイールをツリー外で起動する確認も行う。
+- **macOS checks**: 同じ ruff / mypy と `pytest`。0 failed、skip 3件（ALSA / coreaudio / Rust未ビルド）。
+- **Rust比較**: 固定 SHA `a7eaefa56729161e449a03ab2c0d2872429d8e87` を Rust 1.85.0 でビルドし、`tests/test_rust_cli_compare.py` を実行する。バイナリのダウンロードはしない。
 
 ## オフライン CLI の突き合わせ
 
