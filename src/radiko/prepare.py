@@ -893,6 +893,7 @@ def _get_or_recover(
     except ProbeError as error:
         if error.code != "authentication":
             raise
+        # 401 は再認証を1回だけ試し、同じ位置を取り直す（無限に再認証しない）。
         headers, _how = state.renew(headers, stage)
         try:
             updated, playlist_url, headers = _refresh_playlist(
@@ -1008,6 +1009,7 @@ def _play_station(
     ReconnectBudget の範囲で再接続し、認証切れは再認証して再取得する。
     回復できない失敗は `ProbeError` を送出する（stage が付くことがある）。
     """
+    # 切替・シークをまたいで操作メッセージと音量を持ち越す。
     carried: list[str] = []
     carried_volume: int | None = None
     seek_prep = None
@@ -1016,6 +1018,7 @@ def _play_station(
     all_frames = 0
     all_underrun = 0
     while True:
+        # シーク後は prepare 済みの結果を再利用し、余計な局一覧取得をしない。
         if seek_prep is None:
             program, headers, _area, _outside, urls = prepare(
                 station, mode, cursor, now, session, membership, position, cancelled
@@ -1112,6 +1115,7 @@ def _play_station(
                     reason = "cancelled"
                     break
                 drain()
+                # 局切替は内側ループを抜け、prepare からやり直してデコーダも作り直す。
                 if control.selected is not None:
                     new_mode, new_station, new_cursor, new_offset = control.selected
                     control.selected = None
@@ -1161,6 +1165,7 @@ def _play_station(
                     reseeking = True
                     break
                 if sequence >= media.media_sequence + len(media.segments):
+                    # ENDLIST が無いライブは窓を読み直して続ける。
                     if media.end_list:
                         reason = "program-end"
                         break
@@ -1183,6 +1188,7 @@ def _play_station(
                         if _cancelled_error(error) or cancelled():
                             reason = "cancelled"
                             break
+                        # 再生開始後の通信失敗だけ再接続する。開始前は prepare 側で失敗させる。
                         if budget.can_retry(error, taken > 0) or (
                             taken > 0 and mode == "live" and _playlist_retryable(error)
                         ):
@@ -1288,6 +1294,7 @@ def _play_station(
                     raise
                 reauth.episode = False
                 codec = getattr(media, "declared_codec", None) or codec
+                # limit の切り詰めは _decode_segment が行い、stop/limit_hit でここが打ち切る。
                 decoded_segment = _decode_segment(
                     payload,
                     segment,

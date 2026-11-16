@@ -99,19 +99,23 @@ def _parse_tfhd(
     """tfhd を検証し、(既定 duration, 既定 size) を返す。"""
     tfhd = _one(traf, b"tfhd").data
     flags = _word(tfhd, 0)
+    # Rust と同じ許可ビットだけを受け付け、未知のフラグは別コンテナとして拒否する。
     if flags & ~0x2003A or flags & 0x20000 == 0 or _word(tfhd, 4) != track:
         raise AacError("unsupported-container")
     at = 8
+    # base-data-offset の selector 1（moof 先頭）だけを扱う。
     if flags & 2:
         selector, at = _take(tfhd, at)
         if selector != 1:
             raise AacError("unsupported-container")
+    # 省略時は traf の既定値を使い、sample ごとの値は trun 側で決める。
     if flags & 8:
         default_duration, at = _take(tfhd, at)
     if flags & 16:
         default_size, at = _take(tfhd, at)
     if flags & 32:
         _, at = _take(tfhd, at)
+    # 余りのバイトは未知の任意フィールド。読み飛ばさず長さ不一致として拒否する。
     if at != len(tfhd):
         raise AacError("container")
     return default_duration, default_size
@@ -120,6 +124,7 @@ def _parse_tfhd(
 def _parse_tfdt(tfdt) -> int:
     """tfdt から decode time を返す。version 0 と 1 だけを許す。"""
     version = _word(tfdt, 0)
+    # version 0 は32bit、1 は64bit の decode time。それ以外は未対応として拒否する。
     if version == 0 and len(tfdt) == 8:
         return _word(tfdt, 4)
     if version == 0x01000000 and len(tfdt) == 12:
@@ -132,16 +137,21 @@ def _parse_trun(
 ) -> tuple[list[memoryview], int]:
     """trun の sample 表を検証し、mdat から packet を切り出して (packets, duration) を返す。"""
     flags = _word(trun, 0)
+    # Rust と同じく data-offset / first-sample-flags / sample の duration・size・flags だけを許す。
     if flags & ~0x705 or flags & 1 == 0 or flags & 0x404 == 0x404:
         raise AacError("unsupported-container")
     count = _word(trun, 4)
+    # sample が無い trun は再生位置を進めないため empty として扱う。
     if count == 0:
         raise AacError("empty")
+    # 1セグメントで確保する上限。過大な count でメモリを確保しないための固定値。
     if count > 512:
         raise AacError("many")
     offset = _word(trun, 8)
+    # data_offset は32bit 符号付き。最上位ビットが立つ値は負として読む。
     if offset >= 0x80000000:
         offset = offset - 0x100000000
+    # data_offset が mdat の先頭を指すことを要求し、別の箱のデータを混ぜない。
     if offset < 0 or moof.offset + offset != mdat.offset + mdat.header:
         raise AacError("container")
     cursor_at = 12
@@ -167,11 +177,13 @@ def _parse_trun(
             raise AacError("container")
         duration += dur
         end = cursor + size
+        # コピーせず mdat の memoryview を切る（ゼロコピー）。
         piece = mdat.data[cursor:end]
         if len(piece) != size:
             raise AacError("container")
         packets.append(piece)
         cursor = end
+    # trun の記述長と mdat の消費長が一致しないと、欠け・余りを見逃す。
     if cursor_at != len(trun) or cursor != len(mdat.data):
         raise AacError("container")
     return packets, duration

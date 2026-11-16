@@ -272,15 +272,18 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
                 end_list = True
             elif line == "#EXT-X-I-FRAMES-ONLY":
                 i_frames_only = True
+            # DISCONTINUITY は次のセグメントに付く属性なので、ここではフラグだけ立てる。
             elif line == "#EXT-X-DISCONTINUITY":
                 discontinuity = True
             elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
                 program_date = line.split(":", 1)[1]
+            # MAP は次のセグメント以降に効く初期化セグメント。BYTERANGE 付きは未対応の印だけ付ける。
             elif line.startswith("#EXT-X-MAP:"):
                 map_uri = parse_attribute(line, "URI")
                 map_bad = not map_uri or "BYTERANGE=" in line
             elif line.startswith("#EXT-X-BYTERANGE:"):
                 byte_range = True
+            # KEY も次のセグメントから効く。METHOD が NONE なら平文に戻る。
             elif line.startswith("#EXT-X-KEY:"):
                 method = parse_attribute(line, "METHOD")
                 encrypted = method not in {None, "NONE"}
@@ -338,7 +341,9 @@ def parse_attribute(line: str, name: str) -> str | None:
     if start < 0:
         return None
     rest = line[start + len(marker) :]
+    # 引用符付きはカンマを含められるため、閉じ引用符までを値にする。
     if rest.startswith('"'):
         end = rest.find('"', 1)
         return rest[1:end]
+    # 引用符なしは最初のカンマまで（属性の区切り）。
     return rest.split(",", 1)[0]
