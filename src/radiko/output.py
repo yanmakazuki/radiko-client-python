@@ -199,7 +199,7 @@ class _AlsaStream(OutputStream):
 
     def write(self, samples, volume: int = 100) -> None:
         """量子ずつ書き、一時停止中は無音を書く。入出力のチャンネル数が違えばリミックスし、
-        部分書き込みと -EPIPE は _write_pcm が処理する。
+        部分書き込み、-EPIPE（XRUN）、EAGAIN は _write_pcm が再試行・回復する。
         """
         array = _prepare(samples, volume)
         frames = array.size // self.input_channels
@@ -261,7 +261,8 @@ class _CoreAudioStream(OutputStream):
 def open_stream(rate: int, channels: int, stop=None, paused=None, step_hook=None) -> OutputStream:
     """バックエンドを選んでストリームを開く。
 
-    null sink → CoreAudio → ALSA の順。未対応 OS は OutputError("none")。
+    null sink ならプロセス内出力。それ以外は OS に応じて CoreAudio（darwin）か
+    ALSA（Linux）の一方を選ぶ。未対応 OS は OutputError("none")。
     """
     if null_sink_enabled():
         return _NullStream(rate, channels, stop, paused, step_hook)
