@@ -10,7 +10,7 @@ macOS では Linux の ALSA が使えません。Python 側の音声出力を OS
 
 ## 決定
 
-macOS では AudioQueue を使い、インターリーブの f32 を出します。`output.open_stream` は `host_backend()` が `coreaudio` のとき `coreaudio.Stream` を返します。Linux の ALSA は f32 / i32 / i16 を選べますが、macOS の AudioQueue は f32 のみを扱います。
+macOS では AudioQueue を使い、インターリーブの f32 を出します。`output.open_stream` は `host_backend()` が `coreaudio` のとき `_CoreAudioStream`（`coreaudio.Stream` を包む）を返します。Linux の ALSA は f32 / i32 / i16 を選べますが、macOS の AudioQueue は f32 のみを扱います。
 
 `coreaudio.Stream` は `AudioQueueNewOutput` でキューを作り、完了コールバックを `_callbacks` に保持します。コールバックは `AudioQueueStop` まで生かし、`AudioQueueDispose` で手放します。書き込みは1秒以内のバッファに分けます。未完了バッファがあるまま完了通知が3秒（一度も完了が無ければ活動開始から3.25秒）止まれば `stalled` とします。定数は [coreaudio.py](../../src/radiko/coreaudio.py) の `CALLBACK_WAIT_SECONDS` と `NO_CALLBACK_SECONDS` です。
 
