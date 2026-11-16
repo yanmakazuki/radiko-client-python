@@ -34,13 +34,22 @@ _FORBIDDEN_DECLARATION = re.compile(r"<!(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 
 
 class CatalogError(Exception):
+    """番組表・局一覧の取得と解析の失敗。`code` と任意の `status` / `count` を持つ。
+
+    `str()` が利用者向けの日本語の文言になる。
+    """
+
     def __init__(self, code: str, status: int | None = None, count: int | None = None) -> None:
+        """code・HTTP status・件数を保持し、表示文を例外メッセージにする。"""
         self.code = code
         self.status = status
         self.count = count
         super().__init__(str(self))
 
     def __str__(self) -> str:
+        """code に対応する利用者向けの文言。`http` の 404 は専用の文、`empty` は
+        不正・日付不一致の件数を含める。
+        """
         if self.code == "cancelled":
             return "検索を取り消しました"
         if self.code == "area":
@@ -70,6 +79,7 @@ class CatalogError(Exception):
         return "番組表サーバーと通信できません"
 
     def __eq__(self, other: object) -> bool:
+        """code・status・count が同じなら等しい。"""
         return isinstance(other, CatalogError) and (self.code, self.status, self.count) == (
             other.code,
             other.status,
@@ -78,11 +88,15 @@ class CatalogError(Exception):
 
 
 def validate_area(area: str) -> None:
+    """地域IDが `VALID_AREAS`（JP1〜JP47）にあるか。無ければ CatalogError("area")。"""
     if area not in VALID_AREAS:
         raise CatalogError("area")
 
 
 def validate_station(station: str) -> None:
+    """局IDが空でなく32文字以内の ASCII 大文字・数字・-・_ だけか。
+    違反は CatalogError("station")。
+    """
     if (
         not station
         or len(station) > 32
@@ -95,6 +109,7 @@ def validate_station(station: str) -> None:
 
 
 def parse_day(text: str) -> date:
+    """`YYYYMMDD` を JST の日付にする。8桁でない・実在しない日付は CatalogError("date")。"""
     if len(text) != 8 or not text.isdigit():
         raise CatalogError("date")
     try:
@@ -104,6 +119,10 @@ def parse_day(text: str) -> date:
 
 
 def parse_clock(text: str) -> datetime:
+    """`YYYYMMDDHHmmss` を JST の datetime にする。
+
+    14桁の ASCII 数字でない・実在しない時刻は ValueError("bad")（CatalogError ではない）。
+    """
     if len(text) != 14 or not text.isascii() or not text.isdigit():
         raise ValueError("bad")
     try:
@@ -122,6 +141,8 @@ def parse_clock(text: str) -> datetime:
 
 @dataclass
 class ProgramList:
+    """1局・1放送日の番組表。局名・番組・不正件数・重複件数を持つ。"""
+
     station_id: str
     station_name: str
     broadcast_day: date
@@ -131,6 +152,15 @@ class ProgramList:
 
 
 def parse_programs(data: bytes, station: str, day: date) -> ProgramList:
+    """番組表 XML を検証し、`<prog>` を Program にして放送日順で返す。
+
+    処理順: 局ID検証 → 4MB・XML構造（radiko/stations/station/progs）→ 2048枠上限 →
+    JST 05:00 から翌日 05:00 の窓 → 各 `<prog>` の ft/to（不正は invalid_count）→
+    (局, 開始) の重複（duplicate_count）→ title/pfm/desc/info は最初の要素だけ →
+    tag は重複除去 → genre を番組/出演者に分類 → 開始時刻でソート。
+    有効な枠が無く不正だけなら CatalogError("empty", count=invalid_count)。
+    局不一致は wrong-station、構造不正は xml、上限超過は large。
+    """
     validate_station(station)
     if len(data) > MAX_SCHEDULE_BYTES:
         raise CatalogError("large")
@@ -216,6 +246,11 @@ def parse_programs(data: bytes, station: str, day: date) -> ProgramList:
 
 
 def parse_stations(data: bytes, area: str) -> list[Station]:
+    """局一覧 XML を検証し、Station の並びを返す。
+
+    ルートの `area_id` は指定地域と一致が必要（違反は wrong-area）。`<station>` が
+    1件も無ければ xml、512件超は large。各局IDは validate_station、重複は最初だけ残す。
+    """
     validate_area(area)
     if len(data) > MAX_SCHEDULE_BYTES:
         raise CatalogError("large")
@@ -247,6 +282,12 @@ def parse_stations(data: bytes, area: str) -> list[Station]:
 
 
 def parse_endpoints(data: bytes, timefree: bool, outside: bool) -> list[str]:
+    """配信先 XML から、モードと地域に合う `playlist_create_url` を返す。
+
+    `areafree` と `timefree` が指定に一致する `<url>` だけを対象にし、URL は
+    `trusted()` を通す（通らなければ ProbeError("unsafe")）。重複は除き、該当が
+    無ければ ValueError。XML 不正も ValueError。
+    """
     try:
         root = ET.fromstring(data.decode())
     except (UnicodeError, ET.ParseError) as error:
@@ -273,10 +314,12 @@ def parse_endpoints(data: bytes, timefree: bool, outside: bool) -> list[str]:
 
 
 def _local(tag: str) -> str:
+    """名前空間付きタグからローカル名だけを返す。"""
     return tag.rsplit("}", 1)[-1]
 
 
 def _text(node: ET.Element, name: str) -> str:
+    """指定名の最初の子要素のテキストを返す。無ければ空文字。"""
     for child in node:
         if _local(child.tag) == name:
             return child.text or ""
@@ -284,6 +327,7 @@ def _text(node: ET.Element, name: str) -> str:
 
 
 def _child_texts(node: ET.Element, item_name: str, name: str) -> list[str]:
+    """指定名の子要素すべてについて、その子の指定名テキストを並べて返す。"""
     values = []
     for item in node:
         if _local(item.tag) != item_name:
@@ -324,6 +368,7 @@ def _parse_document(text: str, root_name: str) -> ET.Element:
     depth = 0
 
     def consume(events) -> None:
+        """start/end イベントでルート名と最大深さを検証する。"""
         nonlocal root, depth
         for event, element in events:
             if event == "start":
