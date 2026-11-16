@@ -185,8 +185,8 @@ def _rfc3339_secs(moment: datetime) -> str:
 def parse_program(data: bytes, station: str, cursor: datetime) -> ResolvedProgram:
     """番組 JSON を検証して ResolvedProgram にする。
 
-    1件だけ・cursor が放送枠内・stationId 一致を要求する。blackout の tsInNg /
-    tsplusInNg / tsOutNg / tsplusOutNg は 0 を可、2 を不可、他は未確認。不正は
+    1件だけ・cursor が放送枠内・stationId が一致または欠落、を要求する。blackout の
+    tsInNg / tsplusInNg / tsOutNg / tsplusOutNg は 0 を可、2 を不可、他は未確認。不正は
     `ProbeError("program")`、該当なしは `ProbeError("not-found")`。
     """
     try:
@@ -307,7 +307,8 @@ def prepare(
 
     戻り値は (program, 認証ヘッダ, エリア, エリア外か, プレイリスト URL の候補)。
     各取得の失敗は `ProbeError` に stage（放送枠取得 / 配信認証 / 地域の局一覧取得 /
-    配信先設定の取得）を付けて送出する。mode と position の検証もここで行う。
+    配信先設定の取得）を付けて送出する。position を検証し、mode は timefree 以外を
+    live として扱う。
     """
     cancelled = cancelled or (lambda: False)
     try:
@@ -389,8 +390,8 @@ def _playlist_url(
 def inspect_hls(url: str, headers: dict[str, str], retain: bool, cancelled) -> ProbeReport:
     """マスター/メディアプレイリストをたどり、先頭セグメントを probe する。
 
-    マスターは最大4回まで。帯域が最小のバリアントを選び、暗号化の宣言を引き継ぐ。
-    メディアプレイリストが得られない場合は `ProbeError("playlist")`。
+    マスター/メディアの取得は最大4回。帯域が最小のバリアントを選び、暗号化の宣言を
+    引き継ぐ。メディアプレイリストが得られない場合は `ProbeError("playlist")`。
     """
     codec = None
     encrypted = False
@@ -653,8 +654,9 @@ def _sample(
 def container_name(data: bytes) -> str:
     """ID3 を除いた先頭バイトからコンテナ名を判定する。
 
-    ISO BMFF / ADTS / MPEG-TS / ID3+unknown / unknown を返す。判定できない
-    データでも例外にせず "unknown" を返す。
+    ISO BMFF / fragmented MP4、ADTS（MPEG-2 / MPEG-4 / MPEG-4 CRC）、MPEG-TS、
+    ID3 + unknown payload、unknown を返す。ID3 ヘッダが不正なら "invalid ID3"。
+    判定できなくても例外は出さない。
     """
     offset = id3_offset(data)
     if offset is None:
@@ -1004,7 +1006,7 @@ def _play_station(
     `"limit"`、ENDLIST の終端で `"program-end"` を返す。局切替・シーク要求は
     内側ループを抜けて prepare からやり直す。通信失敗は再生開始後なら
     ReconnectBudget の範囲で再接続し、認証切れは再認証して再取得する。
-    回復できない失敗は stage 付きの `ProbeError` を送出する。
+    回復できない失敗は `ProbeError` を送出する（stage が付くことがある）。
     """
     carried: list[str] = []
     carried_volume: int | None = None
