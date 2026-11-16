@@ -28,6 +28,8 @@ NAME_LIMIT = 256
 
 
 class StreamDescription(ctypes.Structure):
+    """AudioStreamBasicDescription の ctypes 版。"""
+
     _fields_ = [
         ("mSampleRate", ctypes.c_double),
         ("mFormatID", ctypes.c_uint32),
@@ -42,6 +44,8 @@ class StreamDescription(ctypes.Structure):
 
 
 class QueueBuffer(ctypes.Structure):
+    """AudioQueueBuffer の先頭部分。mUserData に積んだフレーム数を読む。"""
+
     _fields_ = [
         ("mAudioDataBytesCapacity", ctypes.c_uint32),
         ("mAudioData", ctypes.c_void_p),
@@ -54,6 +58,8 @@ class QueueBuffer(ctypes.Structure):
 
 
 class AudioObjectPropertyAddress(ctypes.Structure):
+    """AudioObject のプロパティ指定（selector / scope / element）。"""
+
     _fields_ = [
         ("mSelector", ctypes.c_uint32),
         ("mScope", ctypes.c_uint32),
@@ -62,6 +68,8 @@ class AudioObjectPropertyAddress(ctypes.Structure):
 
 
 class AudioValueRange(ctypes.Structure):
+    """サンプルレートなどの最小値と最大値。"""
+
     _fields_ = [
         ("mMinimum", ctypes.c_double),
         ("mMaximum", ctypes.c_double),
@@ -69,6 +77,8 @@ class AudioValueRange(ctypes.Structure):
 
 
 class AudioStreamRangedDescription(ctypes.Structure):
+    """ストリームの形式とサンプルレート範囲。"""
+
     _fields_ = [
         ("mFormat", StreamDescription),
         ("mSampleRateRange", AudioValueRange),
@@ -92,6 +102,7 @@ def library():
 
 
 def _fourcc(text: str) -> int:
+    """4文字コードを big-endian の整数にする。"""
     return int.from_bytes(text.encode("ascii"), "big")
 
 
@@ -112,6 +123,11 @@ def sanitize_device_name(text: str) -> str:
 
 
 def inspect(rate: int, opened=None) -> OutputInfo:
+    """既定出力機器の名前と f32 mono/stereo の対応を返す。
+
+    機器が無ければ OutputError("none")。形式が合わなければ sample_format /
+    channels を None にして、対応範囲の理由を返す。
+    """
     device = _default_output()
     if device is None:
         raise OutputError("none")
@@ -128,6 +144,9 @@ class Stream:
     """1つの AudioQueue を複数チャンクで使い回す。"""
 
     def __init__(self, rate: int, channels: int, stop, step_hook=None) -> None:
+        """AudioQueue を作り、完了コールバックを寿命の間保持する。
+        AudioToolbox が無ければ OutputError("none")。
+        """
         self.rate = rate
         self.channels = channels
         self.stop = stop or threading.Event()
@@ -140,6 +159,7 @@ class Stream:
         self.last_callback: float | None = None
 
         def completed(_user, queue, buffer) -> None:
+            """バッファ完了。未完了数を減らし、再生済みフレームを数えてバッファを返す。"""
             self.outstanding = max(0, self.outstanding - 1)
             self.last_callback = time.monotonic()
             frames = 0
@@ -167,6 +187,9 @@ class Stream:
         self.closed = False
 
     def write(self, samples, volume: int = 100) -> None:
+        """f32 を1秒以内のチャンクに分けて積み、再生位置に合わせて待つ。
+        停止中は何もせず、開始は最初の enqueue 後。
+        """
         if self.closed or self.stop.is_set():
             return
         array = np.asarray(samples, dtype=np.float32).reshape(-1)
@@ -197,6 +220,9 @@ class Stream:
             self._wait(self.started_at + self.queued_frames / self.rate - 0.25)
 
     def _enqueue(self, piece, frames: int) -> None:
+        """AudioQueue のバッファを確保してコピーし、mUserData にフレーム数を積んで
+        enqueue する。失敗時は確保したバッファを返して OutputError("device")。
+        """
         size = piece.nbytes
         buffer_ref = ctypes.POINTER(QueueBuffer)()
         status = self.lib.AudioQueueAllocateBuffer(
@@ -222,6 +248,7 @@ class Stream:
             raise OutputError("device")
 
     def _wait(self, deadline: float) -> None:
+        """deadline まで step_hook を呼びながら待つ。停止なら戻り、停滞なら送出する。"""
         while True:
             if self.step_hook is not None:
                 self.step_hook(self.queued_frames)
@@ -243,6 +270,9 @@ class Stream:
             raise OutputError("stalled")
 
     def close(self) -> None:
+        """再生を待って AudioQueue を停止し、破棄する。再生済みフレームを確定する。
+        停止済みなら経過時間から見積もる。
+        """
         if self.closed:
             return
         self.closed = True
@@ -273,6 +303,7 @@ def play(
     stop,
     step_hook=None,
 ) -> OutputSummary:
+    """Stream を作って書き、閉じる。失敗時も閉じて元のエラーを優先する。"""
     stream = Stream(rate, info.channels or channels, stop, step_hook)
     try:
         stream.write(samples)
@@ -287,6 +318,9 @@ def play(
 
 
 def _open(rate: int, channels: int, lib=None, callback=None):
+    """AudioQueue を作り (lib, queue, callback) を返す。失敗は None。
+    callback は GC されないよう _callbacks に保持する。
+    """
     lib = library() if lib is None else lib
     if lib is None:
         return None
@@ -312,6 +346,7 @@ def _open(rate: int, channels: int, lib=None, callback=None):
 
 
 def _default_output():
+    """既定出力機器の (名前, 公称レート, 形式) を返す。darwin 以外・読めない場合は None。"""
     if sys.platform != "darwin":
         return None
     coreaudio = _load("CoreAudio")
@@ -345,6 +380,7 @@ def _default_output():
 
 
 def _load(name: str):
+    """名前からライブラリを読み込む。見つからなければ None。"""
     path = find_library(name)
     if not path:
         return None
@@ -352,10 +388,12 @@ def _load(name: str):
 
 
 def _address(selector: int, scope: int = SCOPE_GLOBAL, element: int = 0):
+    """AudioObjectPropertyAddress を組み立てる。"""
     return AudioObjectPropertyAddress(selector, scope, element)
 
 
 def _get_data(function, object_id: int, address, size: int):
+    """プロパティの生データを読む。失敗・サイズ超過は None。"""
     data = (ctypes.c_char * size)()
     used = ctypes.c_uint32(size)
     status = function(object_id, ctypes.byref(address), 0, None, ctypes.byref(used), data)
@@ -365,6 +403,7 @@ def _get_data(function, object_id: int, address, size: int):
 
 
 def _get_size(function, object_id: int, address) -> int | None:
+    """プロパティのサイズを返す。失敗は None。"""
     size = ctypes.c_uint32()
     status = function(object_id, ctypes.byref(address), 0, None, ctypes.byref(size))
     if status != 0:
@@ -373,6 +412,7 @@ def _get_size(function, object_id: int, address) -> int | None:
 
 
 def _default_device(coreaudio) -> int | None:
+    """既定出力の AudioDeviceID を返す。無ければ None。"""
     raw = _get_data(
         coreaudio.AudioObjectGetPropertyData,
         SYSTEM_OBJECT,
@@ -386,6 +426,7 @@ def _default_device(coreaudio) -> int | None:
 
 
 def _device_name(coreaudio, corefoundation, device: int) -> str | None:
+    """機器名を UTF-8 で取り出す。失敗は None。CFString は必ず解放する。"""
     address = _address(DEVICE_NAME)
     size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, device, address)
     if not size or size < ctypes.sizeof(ctypes.c_void_p):
@@ -410,6 +451,7 @@ def _device_name(coreaudio, corefoundation, device: int) -> str | None:
 
 
 def _nominal_rates(coreaudio, device: int) -> list[float] | None:
+    """機器の公称サンプルレートを昇順・重複なしで返す。失敗は None。"""
     address = _address(NOMINAL_SAMPLE_RATES)
     size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, device, address)
     if size is None:
@@ -437,6 +479,7 @@ def _nominal_rates(coreaudio, device: int) -> list[float] | None:
 def _stream_formats(
     coreaudio, device: int, nominal: list[float]
 ) -> list[tuple[float, float, int, str]] | None:
+    """機器のストリーム形式を (最小Hz, 最大Hz, ch, ラベル) の並びで返す。失敗は None。"""
     address = _address(DEVICE_STREAMS)
     size = _get_size(coreaudio.AudioObjectGetPropertyDataSize, device, address)
     if size is None:
@@ -506,6 +549,7 @@ def _format_label(fmt: StreamDescription) -> str | None:
 
 
 def _float_physical_format(coreaudio, stream: int) -> bool:
+    """ストリームの物理形式が f32 の linear PCM か。"""
     address = _address(STREAM_PHYSICAL_FORMAT)
     raw = _get_data(
         coreaudio.AudioObjectGetPropertyData, stream, address, ctypes.sizeof(StreamDescription)
@@ -545,11 +589,13 @@ def _mismatch(rate: int, formats) -> str:
 
 
 def _forget(callback) -> None:
+    """完了コールバックの参照を外す。"""
     if callback in _callbacks:
         _callbacks.remove(callback)
 
 
 def _dispose(handle) -> None:
+    """AudioQueue を破棄し、コールバックの参照も外す。"""
     lib, queue = handle[0], handle[1]
     lib.AudioQueueDispose(queue, True)
     if len(handle) > 2:
@@ -557,6 +603,7 @@ def _dispose(handle) -> None:
 
 
 def _description(rate: int, channels: int) -> StreamDescription:
+    """f32 インターリーブの StreamDescription を作る。"""
     description = StreamDescription()
     description.mSampleRate = rate
     description.mFormatID = LINEAR_PCM
@@ -570,6 +617,9 @@ def _description(rate: int, channels: int) -> StreamDescription:
 
 
 def _bind(lib) -> None:
+    """AudioQueue / AudioObject の関数に ctypes の argtypes/restype を設定する。
+    設定済みなら何もしない。
+    """
     if getattr(lib, "_radiko_signed", False):
         return
     signatures = {
@@ -641,6 +691,7 @@ def _bind(lib) -> None:
 
 
 def _signature(function, argtypes, restype) -> None:
+    """関数に argtypes/restype を設定できるときだけ設定する。"""
     if hasattr(function, "argtypes"):
         function.argtypes = argtypes
         function.restype = restype
