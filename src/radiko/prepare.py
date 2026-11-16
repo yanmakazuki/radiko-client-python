@@ -47,6 +47,11 @@ SAMPLE_LIMIT = 8 * 1024 * 1024
 
 @dataclass
 class ResolvedProgram:
+    """API から解決した1番組。放送時刻・タイムフリー可否・イベント情報を持つ。
+
+    `slot()` でカタログ層の SlotProgram に変換する。
+    """
+
     title: str | None
     start: datetime
     end: datetime
@@ -62,6 +67,11 @@ class ResolvedProgram:
 
 @dataclass
 class ProbeReport:
+    """probe の結果。番組メタデータ・コンテナ・サンプル復号の統計を持つ。
+
+    `__repr__` はサンプルの配列を伏せる。`samples` は retain=True のときだけ入る。
+    """
+
     station: str
     starts_at: datetime
     ends_at: datetime
@@ -96,6 +106,15 @@ class ProbeReport:
 
 @dataclass
 class PlayReport:
+    """再生ループの結果。
+
+    `reason` は `limit`（指定秒で停止）/ `cancelled`（停止・キャンセル）/
+    `program-end`（番組終端）。`frames` は出力フレーム数、`segments` は再生した
+    セグメント数、`underrun_frames` はアンダーラン、`sample_rate` / `channels` は
+    最後に使った出力、`messages` は操作中の通知。`title` / `station` / `mode` /
+    `starts_at` / `ends_at` は番組のメタデータ。
+    """
+
     reason: str
     frames: int
     sample_rate: int
@@ -111,12 +130,21 @@ class PlayReport:
 
 
 class ChapterFailure(Exception):
+    """チャプター取得の失敗。メッセージはそのまま利用者向けに表示できる。"""
+
     def __init__(self, text: str) -> None:
         super().__init__(text)
 
 
 @dataclass
 class ChapterView:
+    """チャプター取得の表示用ビュー。
+
+    `kind` は `aligned`（番組と対応済み）/ `unresolved`（対応付け未確認）/
+    `unavailable`（提供なし）。`rows` は (開始秒, 終了秒, 見出し)、`count` /
+    `music` / `invalid` は件数の内訳。
+    """
+
     station: str
     title: str | None
     starts_at: datetime
@@ -1358,6 +1386,10 @@ def _decode_segment(
 
 
 class _StopView:
+    """0引数の述語を `is_set()` 付きの停止オブジェクトに包む。出力ストリームへ渡す
+    `stop` として使う。
+    """
+
     def __init__(self, function) -> None:
         self.function = function
 
