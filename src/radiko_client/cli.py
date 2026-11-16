@@ -99,6 +99,11 @@ CHAPTERS_USAGE = "chapters STATION YYYYMMDDHHmmss（日本時間、取得・一�
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI の入口。引数を省略すると `sys.argv[1:]` を使う。
+
+    `run` の例外は stderr に「エラー: …」と出して 1、壊れたパイプは 141、
+    正常終了は 0 を返す。
+    """
     try:
         run(sys.argv[1:] if argv is None else argv)
     except (ClosedPipe, BrokenPipeError):
@@ -122,6 +127,11 @@ def _silence_stdout() -> None:
 
 
 def run(argv: list[str]) -> None:
+    """`--data-dir` を分離し、サブコマンドへ振り分ける。
+
+    引数なし・`--help` は全体の使い方を stdout に出す。未知のコマンドや個数違反は
+    RuntimeError。`--data-dir` は tui / searches / programs / login 系 / 再生系で使う。
+    """
     args, data_dir = split_data_dir(argv)
     if not args or args == ["--help"]:
         stdout_ln(TOP)
@@ -165,6 +175,10 @@ def run(argv: list[str]) -> None:
 
 
 def split_data_dir(args: list[str]) -> tuple[list[str], Path | None]:
+    """`--data-dir DIR` を1回だけ取り出し、(残りの引数, Path または None) を返す。
+
+    2回目・値なし・空文字・`--` で始まる値は RuntimeError。
+    """
     data_dir = None
     kept: list[str] = []
     index = 0
@@ -186,18 +200,25 @@ def split_data_dir(args: list[str]) -> tuple[list[str], Path | None]:
 
 
 def _session_store(data_dir: Path | None) -> SessionStore:
+    """SessionStore を返す。`--data-dir` が無ければ既定の保存先を使う。"""
     if data_dir is not None:
         return SessionStore(data_dir)
     return SessionStore.default()
 
 
 def _search_store(data_dir: Path | None) -> SearchStore:
+    """SearchStore を返す。`--data-dir` が無ければ既定のデータ保存先を使う。"""
     if data_dir is not None:
         return SearchStore(data_dir)
     return SearchStore(DataDir.default().directory)
 
 
 def inspect_chapters(args: list[str]) -> None:
+    """`inspect-chapters FILE SLOT_SECONDS VERIFIED_OFFSET_SECONDS` を実行する。
+
+    ローカル JSON を解析し、チャプター・不正件数・楽曲除外数を stdout に出す。
+    通信も聴取権限の確認もしない。数値やファイル読み込みの失敗は RuntimeError。
+    """
     if args[2] != args[2].strip():
         raise RuntimeError("放送枠の秒数が不正です")
     try:
@@ -229,16 +250,24 @@ def inspect_chapters(args: list[str]) -> None:
 
 
 def _sigint_stop(stop):
+    """SIGINT を `stop.set()` に差し替え、元のハンドラを返す。"""
     previous = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, lambda *_args: stop.set())
     return previous
 
 
 def _restore_sigint(previous) -> None:
+    """`_sigint_stop` が返した元の SIGINT ハンドラに戻す。"""
     signal.signal(signal.SIGINT, previous)
 
 
 def member_command(command: str, store: SessionStore) -> None:
+    """`login` / `session` / `logout` を実行する。
+
+    logout は保存セッションを削除。session は保存済みセッションの有効性と契約を表示。
+    login は対話端末でメールと非表示パスワードを受け取り、保存して契約を表示する。
+    セッションの読み込み失敗はファイルを残したまま未ログインとして扱う。
+    """
     if command == "logout":
         store.delete()
         stdout_ln("ローカルのセッションを削除しました")
@@ -273,7 +302,10 @@ def member_command(command: str, store: SessionStore) -> None:
 
 
 def _print_membership(membership) -> None:
+    """契約を「ログイン有効 / エリアフリー: あり|なし|未確認 / タイムフリー30: …」で出す。"""
+
     def label(value):
+        """True / False / None を あり / なし / 未確認 にする。"""
         if value is True:
             return "あり"
         if value is False:
@@ -287,6 +319,11 @@ def _print_membership(membership) -> None:
 
 
 def output_info(args: list[str]) -> None:
+    """`output-info [SAMPLE_RATE]` を実行する。
+
+    8000〜192000Hz（既定48000）の既定出力機器を読み、名前と対応宣言または不一致理由を
+    stdout に出す。音声は出さない。`--help` は使い方だけを出す。
+    """
     usage = "output-info [SAMPLE_RATE]（8000〜192000Hz・既定48000Hz、出力機器の読み取りのみ）"
     if args == ["output-info", "--help"]:
         stdout_ln(usage)
@@ -322,6 +359,11 @@ def output_info(args: list[str]) -> None:
 
 
 def probe_output(args: list[str]) -> None:
+    """`probe-output [SECONDS]` または `probe-output --mute [SECONDS]` を実行する。
+
+    生成音は1〜10秒（既定2）、無音は1〜1800秒（既定30）。無音は SIGINT で中断でき、
+    進捗は stderr、結果は stdout に出す。
+    """
     if len(args) == 2 and args[1] == "--help":
         stdout_ln(
             "probe-output [SECONDS]（生成音・1〜10秒・既定2秒）\n"
@@ -382,6 +424,12 @@ def _parse_u32(text: str) -> int:
 
 
 def searches(args: list[str], data_dir: Path | None) -> None:
+    """`searches` のサブコマンドを実行する（list / show / restore / save / delete）。
+
+    保存・一覧・削除は通信しない。`save NAME <programs の条件>` は表示オプションを拒否。
+    `show` は名前が無ければ SearchError("missing")。`restore` は保存条件を当日へ戻して
+    JSON で出し、復元できなければ既定条件（当日・全国・指定なし）を使う。
+    """
     if args == ["--help"]:
         stdout_ln(SEARCHES_USAGE)
         return
@@ -432,6 +480,12 @@ def searches(args: list[str], data_dir: Path | None) -> None:
 
 
 def programs(args: list[str], data_dir: Path | None) -> None:
+    """`programs` を実行する。
+
+    `--help` は使い方。`--saved NAME` / `--restore` は保存条件、それ以外は引数から
+    条件を作る。取得前に直近条件を保存し（失敗は stderr で継続）、1局1日なら
+    `_print_station_day`、複数局・複数日なら `_acquire` を使う。
+    """
     if args == ["--help"]:
         stdout_ln(PROGRAMS_HELP)
         return
@@ -459,6 +513,11 @@ def programs(args: list[str], data_dir: Path | None) -> None:
 
 
 def restored_request(args: list[str], now: datetime, store: SearchStore | None):
+    """`--saved NAME` / `--restore` の引数を解釈し、(ProgramRequest, 保存可否) を返す。
+
+    `--json` / `--classifications` だけを許可。名前付き条件が無ければ
+    SearchError("missing")。`--restore` の復元失敗は既定条件にして保存しない。
+    """
     saved = args[0] == "--saved"
     if saved and len(args) < 2:
         raise RuntimeError(PROGRAMS_USAGE)
@@ -499,6 +558,7 @@ def restored_request(args: list[str], now: datetime, store: SearchStore | None):
 def _from_criteria(
     criteria: SearchCriteria, as_json: bool, classifications: bool
 ) -> ProgramRequest:
+    """SearchCriteria を ProgramRequest に変換する。全国は JP1〜JP47 を対象にする。"""
     if criteria.scope.kind == ScopeKind.STATION:
         station, areas = criteria.scope.value, []
     elif criteria.scope.kind == ScopeKind.AREAS:
@@ -509,6 +569,11 @@ def _from_criteria(
 
 
 def _print_station_day(request: ProgramRequest, now: datetime) -> None:
+    """1局1日の番組表を取得して表示する。
+
+    `--json` は `_snapshot` の JSON、通常は一覧と（指定時）観測分類。
+    不正な放送枠があれば RuntimeError で終了する。
+    """
     client = CatalogClient(catalog_fetch)
     listing = client.programs(request.station, request.range.start)
     if request.json:
@@ -529,10 +594,16 @@ def _print_station_day(request: ProgramRequest, now: datetime) -> None:
 
 
 def _acquire(request: ProgramRequest, now: datetime) -> None:
+    """複数局・複数日の番組表を並列取得して表示する。
+
+    進捗は stderr。`--json` は `_report_snapshot`、通常は一覧・サマリ・未取得の内訳・
+    （指定時）観測分類。欠落があれば RuntimeError。
+    """
     client = CatalogClient(catalog_fetch)
     cancel = threading.Event()
 
     def progress(item) -> None:
+        """取得の進捗を stderr に1行で出す。"""
         day = "" if item.day is None else str(item.day)
         stderr_ln(
             f"{item.phase} {item.completed}/{item.total} / 失敗: {item.failed} / {item.target} {day}"
@@ -573,6 +644,10 @@ def _acquire(request: ProgramRequest, now: datetime) -> None:
 
 
 def _snapshot(listing: ProgramList, now: datetime, criteria_filter: Filter, observed=None) -> dict:
+    """ProgramList を JSON 用の辞書にする。
+
+    フィルタに一致する番組だけを入れ、状態・分類・件数・as_of・timezone などを含む。
+    """
     programs = []
     for program in listing.programs:
         if not criteria_filter.matches(program):
@@ -620,7 +695,10 @@ def _snapshot(listing: ProgramList, now: datetime, criteria_filter: Filter, obse
 
 
 def _observed(observed: ObservedClassifications) -> dict:
+    """ObservedClassifications を JSON 用の辞書にする。scope は今回の取得範囲を表す。"""
+
     def classes(items):
+        """Classification の並びを JSON 用の {id, name} にする。"""
         return [{"id": item.id, "name": item.name} for item in items]
 
     return {
@@ -633,6 +711,7 @@ def _observed(observed: ObservedClassifications) -> dict:
 
 
 def _report_snapshot(report, request: ProgramRequest, now: datetime) -> dict:
+    """Report を JSON 用の辞書にする。局・番組表・失敗・日付範囲・件数を含む。"""
     observed = []
     schedules = []
     for item in report.lists:
@@ -678,6 +757,7 @@ def _report_snapshot(report, request: ProgramRequest, now: datetime) -> dict:
 
 
 def _print_list(listing: ProgramList, now: datetime, criteria_filter: Filter) -> None:
+    """ProgramList を人が読む形式で stdout に出す。見出し・各番組・末尾の件数。"""
     stdout_ln(
         f"{listing.station_name} ({listing.station_id}) / 放送日 {listing.broadcast_day} / 日本時間（実行時点の状態）"
     )
@@ -702,12 +782,14 @@ def _print_list(listing: ProgramList, now: datetime, criteria_filter: Filter) ->
 
 
 def _labels(items) -> str:
+    """分類を「名前（無ければID）」の「、」連結にする。空なら「未分類」。"""
     names = [item.name or item.id for item in items]
     names = [name for name in names if name]
     return "未分類" if not names else "、".join(names)
 
 
 def _print_classes(observed: ObservedClassifications) -> None:
+    """観測した番組/出演者分類と未分類枠数を stdout に出す。"""
     stdout_ln("今回の取得範囲で観測した分類（全分類を保証しません）")
     for label, items in (
         ("番組ジャンル", observed.program_genres),
@@ -721,6 +803,11 @@ def _print_classes(observed: ObservedClassifications) -> None:
 
 
 def chapters(args: list[str]) -> None:
+    """`chapters STATION YYYYMMDDHHmmss` を実行する。
+
+    リモートからチャプターを取得し、見出しと kind ごとの案内、件数、各行を stdout に
+    出す。取得失敗は RuntimeError。
+    """
     if args == ["--help"]:
         stdout_ln(CHAPTERS_USAGE)
         return
@@ -753,6 +840,12 @@ def chapters(args: list[str]) -> None:
 
 
 def play(args: list[str], data_dir: Path | None) -> None:
+    """`play-live` / `play-timefree` を実行する。
+
+    `--seconds` / `--offset` / `--interactive` を解釈し、保存セッションを要求する。
+    Ctrl+C と対話コマンドを prepare.play_station に渡し、開始情報・終了理由・出力統計を
+    stdout に出す。キャンセルは「中断しました」で正常終了する。
+    """
     if len(args) == 2 and args[1] == "--help":
         stdout_ln(PLAY_USAGE)
         return
@@ -768,6 +861,7 @@ def play(args: list[str], data_dir: Path | None) -> None:
         box: queue.Queue[str] = queue.Queue(4)
 
         def reader() -> None:
+            """stdin の行を停止までキューへ移す。"""
             for line in sys.stdin:
                 if stop.is_set():
                     return
@@ -785,6 +879,7 @@ def play(args: list[str], data_dir: Path | None) -> None:
         )
 
         def commands() -> str | None:
+            """キューから操作行を1件取り出す。無ければ None。"""
             try:
                 return box.get(timeout=0.05)
             except queue.Empty:
@@ -806,6 +901,7 @@ def play(args: list[str], data_dir: Path | None) -> None:
     stderr_ln("放送枠・配信条件を確認して連続再生を準備しています…")
 
     def ready(program) -> None:
+        """再生開始時に番組名・局・モード・時刻を stdout に出す。"""
         start = program.start.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
         end = program.end.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
         label = "Live" if mode == "live" else "TimeFree"
@@ -853,6 +949,12 @@ def play(args: list[str], data_dir: Path | None) -> None:
 
 
 def _play_request(args: list[str], now: datetime):
+    """再生コマンドの引数を解釈する。
+
+    `--seconds` は1〜86400、`--offset` は 0〜86400 秒。live の positional は1つ、
+    timefree は2つ。live への `--offset` と timefree の未来時刻は拒否する。
+    戻り値は (mode, station, cursor, seconds, offset, interactive)。
+    """
     positional = []
     seconds = offset = None
     interactive = False
@@ -896,6 +998,7 @@ def _play_request(args: list[str], now: datetime):
 
 
 def _position(value: str) -> float:
+    """秒数の引数を 0〜86400 の float にする。NaN・範囲外は RuntimeError。"""
     try:
         seconds = float(value)
     except ValueError as error:
@@ -906,6 +1009,11 @@ def _position(value: str) -> float:
 
 
 def probe_media(args: list[str], data_dir: Path | None) -> None:
+    """`probe-live` / `probe-timefree` / `play-sample` を実行する。
+
+    セッションを要求し、放送枠・認証・HLS・サンプルを検証して `_print_probe` で表示する。
+    play-sample は先頭セグメントを実際に出力する。timefree の未来時刻は拒否する。
+    """
     validate_station(args[1])
     now = datetime.now(timezone.utc)
     if args[0] == "probe-live" or (args[0] == "play-sample" and len(args) == 2):
@@ -943,6 +1051,7 @@ def probe_media(args: list[str], data_dir: Path | None) -> None:
 
 
 def _require_session(data_dir: Path | None):
+    """保存済みセッションを返す。無ければ RuntimeError（login を促す）。"""
     saved = _session_store(data_dir).load()
     if saved is None:
         raise RuntimeError("未ログインです。loginでログインしてください")
@@ -950,6 +1059,7 @@ def _require_session(data_dir: Path | None):
 
 
 def _membership(session, stop):
+    """セッションの契約を確認する。取り消しは RuntimeError("中断しました")。"""
     try:
         return MemberClient.create(stop.is_set).check(session)
     except AuthError as error:
@@ -959,6 +1069,10 @@ def _membership(session, stop):
 
 
 def _print_probe(report) -> None:
+    """ProbeReport を probe の表示形式で stdout に出す。
+
+    局・モード・時刻、認証エリア、HLS、コーデック、デコード統計、HE-AAC の注意を含む。
+    """
     start = report.starts_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     end = report.ends_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
     stdout_ln(f"{report.station} / {report.mode} / {start}–{end}（日本時間）")
