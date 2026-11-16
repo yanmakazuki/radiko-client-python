@@ -398,6 +398,11 @@ def _parse_document(text: str, root_name: str) -> ET.Element:
 
 
 def loopback_origin(value: str) -> str | None:
+    """`http://127.0.0.1:port` 形式だけを許可して正規化する。
+
+    スキーム・ホスト・ポート・パス（空か /）・クエリ・フラグメントを検査し、
+    合わなければ None。
+    """
     parsed = urlparse(value)
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port:
         return None
@@ -407,6 +412,9 @@ def loopback_origin(value: str) -> str | None:
 
 
 def catalog_base() -> str:
+    """番組表のベース URL。環境変数 `RADIKO_CATALOG_ORIGIN` がループバックならそれを使い、
+    それ以外は `https://radiko.jp`。上書きが不正なら CatalogError("network")。
+    """
     override = os.environ.get("RADIKO_CATALOG_ORIGIN")
     if override:
         origin = loopback_origin(override)
@@ -418,12 +426,16 @@ def catalog_base() -> str:
 
 @dataclass
 class SelectedStation:
+    """局と、その局を返した地域の並び。"""
+
     station: Station
     areas: list[str]
 
 
 @dataclass
 class Failure:
+    """取得に失敗した対象。地域なら day なし、番組表なら局と日付を持つ。"""
+
     target: str
     error: CatalogError
     day: date | None = None
@@ -431,6 +443,8 @@ class Failure:
 
 @dataclass
 class Report:
+    """取得結果の集約。地域・局・番組表と、地域/番組表ごとの失敗を保持する。"""
+
     areas: list[str] = field(default_factory=list)
     stations: list[SelectedStation] = field(default_factory=list)
     lists: list[ProgramList] = field(default_factory=list)
@@ -438,6 +452,9 @@ class Report:
     schedule_failures: list[Failure] = field(default_factory=list)
 
     def complete(self) -> bool:
+        """地域・番組表の失敗が無く、全 ProgramList の invalid_count が0なら True。
+        重複件数（duplicate_count）は完全性の判定に含めない。
+        """
         return (
             not self.area_failures
             and not self.schedule_failures
@@ -447,6 +464,8 @@ class Report:
 
 @dataclass
 class Progress:
+    """進捗コールバックに渡す1件分。phase・対象・完了数・総数・失敗数など。"""
+
     phase: str
     target: str
     completed: int
@@ -457,15 +476,20 @@ class Progress:
 
 
 class CatalogClient:
+    """fetch 関数で XML を取得し、局一覧と番組表を解析するクライアント。"""
+
     def __init__(self, fetch) -> None:
+        """URL を受けて bytes を返す fetch を保持する。"""
         self.fetch = fetch
 
     def stations(self, area: str) -> list[Station]:
+        """地域の局一覧 XML を取得して解析する。地域IDを先に検証する。"""
         validate_area(area)
         data = self.fetch(f"{catalog_base()}/v3/station/list/{area}.xml")
         return parse_stations(data, area)
 
     def programs(self, station: str, day: date) -> ProgramList:
+        """局・放送日の番組表 XML を取得して解析する。局IDを先に検証する。"""
         validate_station(station)
         data = self.fetch(
             f"{catalog_base()}/v3/program/station/date/{day.strftime('%Y%m%d')}/{station}.xml"
@@ -474,6 +498,11 @@ class CatalogClient:
 
 
 def decode_body(data: bytes, encoding: str | None) -> bytes:
+    """取得した本文を検査して返す。
+
+    4MB 超は large。`identity` / 未指定はそのまま、`gzip` は上限付きで展開し、
+    それ以外のエンコーディングは CatalogError("xml")。
+    """
     if len(data) > MAX_SCHEDULE_BYTES:
         raise CatalogError("large")
     if encoding in {None, "identity"}:
@@ -515,6 +544,13 @@ def _gunzip_bounded(data: bytes) -> bytes:
 def acquire_range(
     source, areas: list[str], span: BroadcastRange, cancelled: threading.Event, progress
 ) -> Report:
+    """地域の並びから局一覧を並列取得し、続けて全員分の番組表を取得する。
+
+    地域IDは重複を除いてソートし、空なら CatalogError("area")。局一覧は最大4並列で、
+    CatalogError は area_failures に積んで続行、それ以外の例外は送出する。同じ局が
+    複数地域にある場合は areas にまとめる。番組表は `_schedules` が担当。
+    各段階の前後と `_schedules` 内で cancelled を確認し、取り消しは CatalogError("cancelled")。
+    """
     if cancelled.is_set():
         raise CatalogError("cancelled")
     for area in areas:
@@ -527,6 +563,7 @@ def acquire_range(
     failed = 0
 
     def one(area: str):
+        """1地域の局一覧を取得する。取り消し済みなら CatalogError("cancelled")。"""
         if cancelled.is_set():
             raise CatalogError("cancelled")
         return source.stations(area)
@@ -558,6 +595,11 @@ def acquire_range(
 def acquire_stations(
     source, stations: list[str], span: BroadcastRange, cancelled: threading.Event, progress
 ) -> Report:
+    """局IDの並びから全員分の番組表を並列取得する。
+
+    空なら CatalogError("station")、各IDは validate_station。局名は取得できた
+    ProgramList の station_name で補う。取り消しは CatalogError("cancelled")。
+    """
     if cancelled.is_set():
         raise CatalogError("cancelled")
     if not stations:
@@ -580,10 +622,17 @@ def acquire_stations(
 def _schedules(
     source, span: BroadcastRange, report: Report, cancelled: threading.Event, progress
 ) -> None:
+    """局×放送日の番組表を最大4並列で取得し、report に詰める。
+
+    CatalogError は schedule_failures に積んで続行し、それ以外の例外は送出する。
+    各件で progress を呼び、lists・area_failures・schedule_failures をソートする。
+    取り消されたら残りを打ち切る。
+    """
     jobs = [(station.station.id, day) for station in report.stations for day in span.days]
     failed = 0
 
     def one(job):
+        """1局・1日の番組表を取得する。取り消し済みなら CatalogError("cancelled")。"""
         station, day = job
         if cancelled.is_set():
             raise CatalogError("cancelled")
@@ -611,11 +660,17 @@ def _schedules(
 
 
 def _parallel(items, function, cancelled: threading.Event):
+    """items を最大4並列で function に渡し、(item, 結果) の並びを返す。
+
+    各スロットの CatalogError とその他の例外は結果として保持し、送出は呼び出し側が行う。
+    取り消し済みのスロットには CatalogError("cancelled") を入れる。
+    """
     if not items:
         return []
     results: list = [None] * len(items)
 
     def run(index: int, item):
+        """1件を実行し、結果か例外を自分のスロットに格納する。"""
         if cancelled.is_set():
             results[index] = CatalogError("cancelled")
             return
