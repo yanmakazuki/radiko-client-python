@@ -133,6 +133,8 @@ flowchart TB
 
 `__init__.py`（`radiko` / `radiko_client`）と `__main__.py` は省略しています。
 
+設計判断は [ADR 0001](adr/0001-use-pyav.md) / [ADR 0002](adr/0002-in-process-null-sink.md) / [ADR 0003](adr/0003-macos-audioqueue.md) に記録しています。
+
 ## データの流れ
 
 1. 番組表: `catalog.parse_programs` が番組表 XML を `ProgramList`（`Program` の集合）へ変換します。`catalog.acquire_range` は地域・日付ごとに取得し、最大4並列で集めます。
