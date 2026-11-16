@@ -137,7 +137,7 @@ class FilterForm:
         editor.cursor = len(text.encode())
 
     def picker_rows(self) -> list[str]:
-        """F2 の地域・分類選択に出す行を作る。局一覧では選択行に > を付け、分類では
+        """F2 の地域・分類選択に出す行を作る。地域一覧では選択行に > を付け、分類では
         「全て」「未分類」と各IDのチェック状態を表す。picker が無ければ空。
         """
         if self.picker is None:
@@ -159,7 +159,7 @@ class FilterForm:
         return rows
 
     def line(self) -> str:
-        """F2 の選択ダイアログの本文。picker 中は候補と操作説明、通常は6項目・未分類2つ・観測した分類を並べる。"""
+        """F2 の選択ダイアログの本文。picker 中は候補と操作説明、通常は6項目・未分類2つと「観測した分類」の見出しを置く。"""
         if self.picker is not None:
             body = "\n".join(self.picker_rows())
             hint = "上下 選択 / Space 切替 / Enter 条件へ反映（検索しません） / Esc 取消"
