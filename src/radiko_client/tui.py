@@ -511,12 +511,14 @@ class Screen:
     _visible_filter: Filter | None = field(default=None, repr=False, compare=False)
 
     def _quit(self) -> None:
+        """終了フラグを立て、実行中のジョブがあればキャンセルする。"""
         self.quit = True
         cancel = self.job_cancel
         if cancel is not None:
             cancel.set()
 
     def ensure_criteria(self) -> SearchCriteria:
+        """検索条件が未設定なら当日・全国の既定条件を作って返す。"""
         if self.criteria is None:
             self.criteria = SearchCriteria.initial(self.now)
         return self.criteria
@@ -541,6 +543,12 @@ class Screen:
         return rows
 
     def handle(self, key: str) -> None:
+        """キー入力を現在の area に振り分ける。ctrl-c は常に終了。
+
+        login / chapters / filter / keyword / named / logout / seconds は各ハンドラへ、
+        help・device・failures は q / Esc（device は d も）で list へ戻る。list では
+        esc → 通知消去 → 移動系 → 一覧操作の順に処理する。
+        """
         self.clock += 0.05
         self._expire_info()
         if key == "ctrl-c":
@@ -669,6 +677,7 @@ class Screen:
             self._commit_search()
 
     def keyword_preview(self, rows: list[Program] | None = None) -> str | None:
+        """keyword area のとき、下書きキーワードでの一致件数を幅に応じて返す。他の area は None。"""
         if self.area != "keyword":
             return None
         try:
@@ -682,6 +691,7 @@ class Screen:
         return full if display_width(full) <= self.width else short
 
     def render(self) -> list[str]:
+        """現在の area に応じた画面行を返す。list はヘッダ・番組一覧・フッタを高さに合わせる。"""
         if self.area == "help":
             help_rows = self._overlay(help_text())
             help_rows[-1] = truncate_width("q/Esc閉じる", self.width)
@@ -748,6 +758,7 @@ class Screen:
         return grid[: self.height]
 
     def _overlay(self, text: str) -> list[str]:
+        """テキストを幅で折り返し、高さに合わせたオーバーレイ行にする。"""
         lines: list[str] = []
         for paragraph in text.splitlines() or [""]:
             lines.extend(wrap_display(paragraph, max(self.width, 1)))
@@ -756,15 +767,18 @@ class Screen:
         return shown
 
     def _scope(self) -> str:
+        """検索条件の範囲を表示用の文字列にする。"""
         return criteria_scope(self.ensure_criteria())
 
     def _mode_label(self) -> str:
+        """ライブ/タイムフリーとオフライン確認の表示を返す。"""
         mode = "ライブ（放送中のみ）" if self.live else "タイムフリー"
         if self.offline:
             return f"{mode} / オフライン確認"
         return mode
 
     def _header(self, compact: bool) -> list[str]:
+        """一覧画面のヘッダ行。compact では2行に短縮する。"""
         criteria = self.ensure_criteria()
         scope = self._scope()
         start = criteria.range.start
@@ -790,6 +804,7 @@ class Screen:
         return [truncate_width(line, self.width) for line in lines]
 
     def _footer(self, compact: bool) -> list[str]:
+        """再生状態・通知・操作ヒントのフッタ3行を返す。"""
         if self.playing:
             mode = "ライブ" if self.live else "タイムフリー"
             state = "一時停止" if self.paused else "再生中"
@@ -820,17 +835,20 @@ class Screen:
         ]
 
     def notice_color(self) -> str | None:
+        """通知の色。no_color・通知なし・INFO は None、ERROR は red、WARNING は yellow。"""
         if self.no_color or self.notice is None or self.notice.level == NoticeLevel.INFO:
             return None
         return "red" if self.notice.level == NoticeLevel.ERROR else "yellow"
 
     def _login_body(self) -> str:
+        """ログイン画面の本文。パスワードは入力有無だけを出す。"""
         hidden = "未入力" if self.password == "" else "入力済み（非表示）"
         mail_mark = " " if self.password_focus else ">"
         password_mark = ">" if self.password_focus else " "
         return f"{mail_mark} メールアドレス: {self.mail}\n{password_mark} パスワード: {hidden}"
 
     def _chapter_body(self) -> str:
+        """チャプター一覧と選択中の要約を本文にする。未取得なら通知を添える。"""
         if not self.chapters:
             notice = self.notice.text if self.notice else ""
             return "チャプター未提供" + (f"\n{notice}" if notice else "")
@@ -851,6 +869,7 @@ class Screen:
 
     def _open_filter(self, criteria: SearchCriteria | None = None) -> None:
         # 呼び出し元の条件を下書きに入れるだけ。確定は編集画面の Enter。
+        """現在（または指定）の条件を下書きにして filter area を開く。確定は編集画面の Enter。"""
         if criteria is None:
             criteria = self.ensure_criteria()
         end = ""
@@ -870,6 +889,9 @@ class Screen:
         self.area = "filter"
 
     def _filter_key(self, key: str) -> None:
+        """filter area のキー。Tab/上下で項目移動、F2で候補選択、Enterで確定、Escで取消。
+        候補ピッカー表示中は j/k/Home/End/space/Enter/Esc を扱う。
+        """
         form = self.filter_form
         if form is None:
             self.area = "list"
@@ -958,6 +980,7 @@ class Screen:
             form.field(form.focus).handle(key)
 
     def _open_class_picker(self, form: FilterForm, focus: int) -> None:
+        """分類の選択候補を観測結果から作り、現在の指定を選択済みにして開く。"""
         axis = 0 if focus == 3 else 1
         choices = form.observed.program_genres if axis == 0 else form.observed.personality_genres
         current = form.field(focus).value
@@ -979,6 +1002,7 @@ class Screen:
         form.picker_field = focus
 
     def _toggle_class(self, form: FilterForm, position: int) -> None:
+        """ピッカーの位置の分類IDを選択/解除する。空・128バイト超・制御文字・合計4096バイト超は拒否。"""
         if not (0 <= position < len(form.picker_ids or [])):
             return
         class_id = (form.picker_ids or [])[position]
@@ -1000,6 +1024,7 @@ class Screen:
             form.error = ""
 
     def _framed(self, title: str, body: str) -> list[str]:
+        """タイトル付きの枠で本文を包み、幅と高さに合わせる。"""
         lines = [truncate_width(f"┌ {title}", self.width)]
         for paragraph in body.splitlines() or [""]:
             wrapped = wrap_display(paragraph, max(self.width - 2, 1))
@@ -1010,6 +1035,9 @@ class Screen:
         return lines
 
     def _login_key(self, key: str) -> None:
+        """login area のキー。Tabでメール/パスワード、Enterで送信、Escで取消、
+        Backspace/Ctrl+Uで編集する。オフラインでは入力しない。
+        """
         if key == "esc":
             self.password = ""
             self.area = "list"
@@ -1053,6 +1081,9 @@ class Screen:
                     self.mail += key
 
     def _chapters(self, key: str) -> None:
+        """chapters area のキー。Tabで要約、上下で選択/スクロール、Enterで再生、
+        rで再取得、q/Escで一覧へ戻る。
+        """
         if key == "tab":
             self.chapter_summary_focused = not self.chapter_summary_focused
             return
@@ -1086,6 +1117,7 @@ class Screen:
         self._set_notice(NoticeLevel.INFO, f"{title} から再生します", False)
 
     def publish(self, generation: int, programs: list[Program]) -> bool:
+        """取得結果を世代付きで反映する。古い世代なら捨てて False。"""
         if generation != self.generation:
             return False
         self.programs = programs
@@ -1094,6 +1126,7 @@ class Screen:
         return True
 
     def _commit_search(self) -> None:
+        """committed を確定条件にして世代を進め、再取得を要求する（オフライン時は除く）。"""
         base = self.ensure_criteria()
         try:
             self.criteria = SearchCriteria.create(base.scope, base.range, self.committed)
@@ -1106,6 +1139,7 @@ class Screen:
             self.fetch_programs = True
 
     def _request_device(self) -> None:
+        """機器診断を別スレッドで開始し、世代付きの結果を device_box に積む。"""
         self.device_generation += 1
         generation = self.device_generation
         self.device_status = "loading"
@@ -1127,6 +1161,7 @@ class Screen:
         threading.Thread(target=work, daemon=True).start()
 
     def poll_device(self) -> None:
+        """機器診断の結果を1件取り出す。古い世代は捨て、状態と表示文を更新する。"""
         box = self.device_box
         if box is None:
             return
@@ -1150,6 +1185,7 @@ class Screen:
         self.device_text = f"{report.host} / {report.name}"
 
     def _device_body(self) -> str:
+        """device area の本文。状態（loading/failed/ready）に応じた行を返す。"""
         if self.device_status == "loading":
             lines = ["取得中…"]
         elif self.device_status == "failed":
@@ -1172,6 +1208,7 @@ class Screen:
         return "\n".join(lines)
 
     def _failures_body(self) -> str:
+        """failures area の本文。取得状況・失敗・不正枠の内訳を返す。"""
         if self.fetches == 0:
             status = "未取得"
         elif self.area_failures or self.schedule_failures:
@@ -1197,12 +1234,16 @@ class Screen:
         return "\n".join(lines)
 
     def _selected_program(self) -> Program | None:
+        """一覧で選択中の番組。一覧が空なら None。"""
         rows = self.visible()
         if not rows:
             return None
         return rows[min(self.selected, len(rows) - 1)]
 
     def _start(self, program: Program, mode: str, offset: float = 0.0) -> None:
+        """指定番組を再生要求にする。ライブの放送前/終了、タイムフリーの放送前、
+        オフラインは通知で拒否する。
+        """
         status = broadcast_status(program.key.starts_at, program.ends_at, self.now)
         if mode == "live" and status != BroadcastStatus.ON_AIR:
             text = (
@@ -1228,6 +1269,7 @@ class Screen:
         self._set_notice(NoticeLevel.INFO, "再生準備中", sticky=False)
 
     def _enter(self) -> None:
+        """Enter。filter area では確定、list では選択番組を再生する。"""
         if self.area == "filter":
             self._commit_search()
             return
@@ -1238,6 +1280,7 @@ class Screen:
         self._start(program, "live" if self.live else "timefree")
 
     def _live(self) -> None:
+        """選択番組をライブで再生する。オフライン・番組なしは通知/無視。"""
         if self.offline:
             self._set_notice(NoticeLevel.INFO, "オフライン確認では再生しません", sticky=False)
             return
@@ -1247,6 +1290,7 @@ class Screen:
         self._start(program, "live")
 
     def _open_seconds(self) -> None:
+        """秒指定を開く。再生中でない/ライブは通知で拒否する。"""
         if self.playing is None:
             self._set_notice(NoticeLevel.INFO, "再生中の番組はありません", sticky=False)
             return
@@ -1260,6 +1304,7 @@ class Screen:
         self.area = "seconds"
 
     def _seconds_body(self) -> str:
+        """seconds area の本文。番組の枠長と入力中テキストを出す。"""
         if self.playing is None:
             return "再生中の番組はありません"
         total = int((self.playing.ends_at - self.playing.key.starts_at).total_seconds())
@@ -1269,9 +1314,11 @@ class Screen:
         )
 
     def _named_store(self) -> SearchStore:
+        """名前付き条件の SearchStore。data_dir が無ければ既定の保存先。"""
         return SearchStore(self.data_dir or default_data_dir())
 
     def _open_named(self) -> None:
+        """保存済み条件を読み込んで named area を開く。オフライン・読み込み失敗は通知。"""
         if self.offline:
             self._set_notice(
                 NoticeLevel.INFO, "オフライン確認では保存条件を読み書きしません", sticky=False
@@ -1290,6 +1337,7 @@ class Screen:
         self.area = "named"
 
     def _on_air(self) -> None:
+        """放送中の番組へ選択を移す。無ければ現在時刻に最も近い番組を選ぶ。"""
         rows = self.visible()
         if not rows:
             self._set_notice(NoticeLevel.INFO, "移動できる番組がありません", sticky=False)
@@ -1309,6 +1357,7 @@ class Screen:
         self._set_notice(NoticeLevel.INFO, "現在時刻に近い番組を選択しました", sticky=False)
 
     def _station_draft(self) -> None:
+        """選択番組の局を下書きに入れた filter を開く。"""
         rows = self.visible()
         if not rows:
             self._set_notice(NoticeLevel.INFO, "局で絞るには番組を選択してください", sticky=False)
@@ -1319,6 +1368,7 @@ class Screen:
             self.filter_form.set_field(2, f"局:{program.key.station_id}")
 
     def _seek(self, delta: int) -> bool:
+        """再生位置を delta 秒動かす。枠外は通知して False。再生中でなければ False。"""
         if not self.playing:
             return False
         total = (self.playing.ends_at - self.playing.key.starts_at).total_seconds()
@@ -1340,6 +1390,7 @@ class Screen:
             pass
 
     def _keyword(self, key: str) -> None:
+        """keyword area のキー。Enterで確定、Escで取消、文字/編集キーは LineEditor へ渡す。"""
         if key == "esc":
             self.area = "list"
             self._dismiss_error_only()
@@ -1367,6 +1418,7 @@ class Screen:
             self.draft_keyword.handle(key)
 
     def _named(self, key: str) -> None:
+        """named area のキー。browse は j/k/Enter/n/d/r/q、name は入力、delete は y/n。"""
         names = list(self.named)
         if self.named_mode == "name":
             if key == "esc":
@@ -1423,6 +1475,7 @@ class Screen:
             self._open_filter(criteria)
 
     def _save_named(self) -> None:
+        """下書き名で現在の条件を保存し、一覧を読み直す。失敗は通知。"""
         name = self.draft_name.value
         try:
             store = self._named_store()
@@ -1438,6 +1491,7 @@ class Screen:
         self._set_notice(NoticeLevel.INFO, f"「{name}」を保存しました", sticky=False)
 
     def _delete_named(self) -> None:
+        """named_target の条件を削除し、一覧を読み直す。失敗は通知。"""
         name = self.named_target
         try:
             store = self._named_store()
@@ -1453,6 +1507,7 @@ class Screen:
         self._set_notice(NoticeLevel.INFO, f"「{name}」を削除しました", sticky=False)
 
     def _named_body(self) -> str:
+        """named area の本文。一覧・選択中条件・モード別の案内を返す。"""
         names = list(self.named)
         if not names:
             lines = ["保存済み条件はありません。nで確定済み条件を保存できます"]
@@ -1480,6 +1535,7 @@ class Screen:
         return "\n".join(lines)
 
     def _logout(self, key: str) -> None:
+        """logout area のキー。y でログアウト要求、n/Esc/q で一覧へ戻る。"""
         if key == "y":
             self.area = "list"
             if self.offline:
@@ -1491,6 +1547,7 @@ class Screen:
             self.area = "list"
 
     def _seconds(self, key: str) -> None:
+        """seconds area のキー。数字/Backspace/Ctrl+U で編集、Enterで確定、Escで取消。"""
         if key == "esc":
             self.area = "list"
             return
@@ -1525,6 +1582,7 @@ class Screen:
             self.seconds_error = ""
 
     def _esc(self) -> None:
+        """Esc。ガイド→通知→QUIT_HINT の順に閉じ、隠れた警告を戻す。"""
         if self.output_guide:
             self.output_guide = None
         if self.notice is None:
@@ -1539,6 +1597,7 @@ class Screen:
             self.hidden_warning = None
 
     def _dismiss_for_key(self, key: str) -> None:
+        """キー入力で通知を閉じる。ERROR は残し、WARNING と sticky でない通知は隠れた警告に戻す。"""
         if self.notice is None:
             return
         if self.notice.level == NoticeLevel.ERROR:
@@ -1548,16 +1607,19 @@ class Screen:
             self.hidden_warning = None
 
     def _dismiss_error_only(self) -> None:
+        """ERROR 通知だけを閉じ、隠れた警告があれば戻す。"""
         if self.notice and self.notice.level == NoticeLevel.ERROR:
             self.notice = self.hidden_warning
             self.hidden_warning = None
 
     def _expire_info(self) -> None:
+        """sticky でない INFO 通知を NOTICE_HOLD 経過後に消す。"""
         if self.notice and self.notice.level == NoticeLevel.INFO and not self.notice.sticky:
             if self.clock - self.notice.created >= NOTICE_HOLD:
                 self.notice = None
 
     def _set_notice(self, level: str, text: str, sticky: bool) -> None:
+        """通知を設定する。既存の重大度が高ければ WARNING を隠し、ERROR は WARNING を押しのける。"""
         incoming = Notice(level, text, sticky, self.clock)
         if self.notice and NoticeLevel.rank(self.notice.level) > NoticeLevel.rank(level):
             if level == NoticeLevel.WARNING:
@@ -1568,6 +1630,7 @@ class Screen:
         self.notice = incoming
 
     def _page(self) -> int:
+        """PageUp/PageDown の移動量（高さ-6、最低1）。"""
         return max(self.height - 6, 1)
 
 
