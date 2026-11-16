@@ -23,22 +23,27 @@ class MemberSession:
     """再利用できるセッショントークンだけを持つ。パスワードは持たない。"""
 
     def __init__(self, token: str) -> None:
+        """トークンを検証して保持する。不正なら ValueError("セッション形式が不正です")。"""
         if not _valid_token(token):
             raise ValueError("セッション形式が不正です")
         self._token = token
 
     @property
     def token(self) -> str:
+        """保存・認証に使うトークン。`repr` には出さない。"""
         return self._token
 
     def __repr__(self) -> str:
+        """トークンを伏せた表現を返す。"""
         return "MemberSession([REDACTED])"
 
     def to_dict(self) -> dict:
+        """保存用の辞書にする。キーは `token` だけ。"""
         return {"token": self._token}
 
 
 def _valid_token(token: str) -> bool:
+    """Cookie として送れる ASCII トークンか。1〜4096バイト、制御文字と区切り文字を拒否。"""
     if not token or len(token.encode()) > 4096:
         return False
     try:
@@ -49,11 +54,17 @@ def _valid_token(token: str) -> bool:
 
 
 class Membership:
+    """会員の聴取可否。`area_free` はエリア外聴取、`time_free_30` は30日間の
+    タイムフリー。不明は None。
+    """
+
     def __init__(self, area_free: bool | None, time_free_30: bool | None) -> None:
+        """2つの可否を保持する。値は True / False / None（未確認）。"""
         self.area_free = area_free
         self.time_free_30 = time_free_30
 
     def __eq__(self, other: object) -> bool:
+        """2つの可否が同じなら等しい。"""
         return (
             isinstance(other, Membership)
             and self.area_free == other.area_free
@@ -62,13 +73,20 @@ class Membership:
 
 
 class StorageError(Exception):
+    """session.json の読み書き失敗。`code` と `detail` から表示文を作る。
+
+    code は io / invalid / version / permissions / path / nodir。
+    """
+
     def __init__(self, code: str, detail: str = "") -> None:
+        """code と detail を保持し、表示文を例外メッセージにする。"""
         self.code = code
         self.detail = detail
         super().__init__(self.text)
 
     @property
     def text(self) -> str:
+        """code に対応する利用者向けの文言。未知の code は汎用の失敗文。"""
         if self.code == "io":
             return f"セッションファイルの操作に失敗しました ({self.detail})"
         if self.code == "invalid":
@@ -85,12 +103,19 @@ class StorageError(Exception):
 
 
 class SearchError(Exception):
+    """searches.json の読み書き失敗。名前・件数・ロックの失敗も表す。
+
+    code は name / missing / many / storage。storage のときは元の StorageError を持つ。
+    """
+
     def __init__(self, code: str, storage: StorageError | None = None) -> None:
+        """code と、storage 失敗なら元の StorageError を保持する。"""
         self.code = code
         self.storage = storage
         super().__init__(str(self))
 
     def __str__(self) -> str:
+        """code（と元の StorageError）に対応する利用者向けの文言。"""
         if self.code == "name":
             return "条件名は前後空白・制御文字なしの1〜64文字で指定してください"
         if self.code == "missing":
@@ -116,6 +141,10 @@ class SearchError(Exception):
 
 
 def io_kind(error: OSError) -> str:
+    """OSError を保存層の短い分類に変える。
+
+    NotFound / PermissionDenied / WouldBlock / StorageFull、該当しなければ例外クラス名。
+    """
     if isinstance(error, FileNotFoundError) or error.errno == errno.ENOENT:
         return "NotFound"
     if isinstance(error, PermissionError) or error.errno == errno.EACCES:
@@ -139,36 +168,54 @@ def default_data_dir() -> Path:
 
 
 class DataDir:
+    """データ保存先のディレクトリ。session と searches のストアを作る。"""
+
     def __init__(self, directory: Path) -> None:
+        """保存先ディレクトリを受け取る。作成はしない。"""
         self.directory = directory
 
     @classmethod
     def default(cls) -> DataDir:
+        """既定の保存先を返す。解決できない場合は StorageError("nodir")。"""
         try:
             return cls(default_data_dir())
         except OSError as error:
             raise StorageError("nodir") from error
 
     def sessions(self) -> SessionStore:
+        """このディレクトリを使う SessionStore を返す。"""
         return SessionStore(self.directory)
 
     def searches(self) -> SearchStore:
+        """このディレクトリを使う SearchStore を返す。"""
         return SearchStore(self.directory)
 
 
 class SessionStore:
+    """session.json の読み書き。ディレクトリ0700・ファイル0600・原子的置換を守る。
+    シンボリックリンクと通常ファイル以外は拒否する。
+    """
+
     def __init__(self, directory: Path) -> None:
+        """保存先ディレクトリを受け取る。作成は save 時。"""
         self.directory = Path(directory)
 
     @classmethod
     def default(cls) -> SessionStore:
+        """既定のデータ保存先を使うストアを返す。"""
         return DataDir.default().sessions()
 
     @property
     def path(self) -> Path:
+        """session.json のパス。"""
         return self.directory / "session.json"
 
     def load(self) -> MemberSession | None:
+        """session.json を読む。無ければ None。
+
+        ディレクトリ・ファイルは 0700/0600 と通常ファイル（リンク不可）を要求する。
+        16KiB 超・JSON 不正・未知 version は StorageError。破損ファイルは削除せず残す。
+        """
         if not self._directory_exists():
             return None
         try:
@@ -195,6 +242,11 @@ class SessionStore:
         return _decode_session(data)
 
     def save(self, session: MemberSession) -> None:
+        """session.json を書く。
+
+        ディレクトリを 0700 で作り、0600 の一時ファイルから os.replace で原子的に置換する。
+        既存のリンクは拒否する。
+        """
         if not _valid_token(session.token):
             raise StorageError("invalid")
         self._ensure_directory()
@@ -211,6 +263,7 @@ class SessionStore:
         _atomic_write(self.directory, self.path, payload)
 
     def delete(self) -> None:
+        """session.json を削除してディレクトリを fsync する。無ければ何もしない。"""
         if not self._directory_exists():
             return
         try:
@@ -222,6 +275,7 @@ class SessionStore:
         _sync_directory(self.directory)
 
     def _directory_exists(self) -> bool:
+        """保存先ディレクトリの存在と 0700・非リンクを確認する。無ければ False。"""
         try:
             metadata = self.directory.lstat()
         except FileNotFoundError:
@@ -235,6 +289,7 @@ class SessionStore:
         return True
 
     def _ensure_directory(self) -> None:
+        """保存先が無ければ 0700 で作り、既存なら権限とリンクだけを確認する。"""
         if self._directory_exists():
             return
         try:
@@ -247,22 +302,34 @@ class SessionStore:
 
 
 class Library:
+    """searches.json の中身。直近条件と、名前付き条件の辞書。"""
+
     def __init__(
         self, last: SearchCriteria | None = None, named: dict[str, SearchCriteria] | None = None
     ):
+        """直近条件と名前付き条件を保持する。named の既定は空。"""
         self.last = last
         self.named = named or {}
 
 
 class SearchStore:
+    """searches.json の読み書き。ロックと原子的置換、0700/0600 を守る。"""
+
     def __init__(self, directory: Path) -> None:
+        """保存先ディレクトリを受け取る。session と同じディレクトリを使う。"""
         self.base = SessionStore(directory)
 
     @property
     def path(self) -> Path:
+        """searches.json のパス。"""
         return self.base.directory / "searches.json"
 
     def load(self) -> Library:
+        """searches.json を読む。無ければ空の Library。
+
+        形式は {"version": 1, "last": 条件|null, "named": {名前: 条件}}。
+        壊れたファイルは SearchError("storage") にするが削除しない。
+        """
         try:
             if not self.base._directory_exists():
                 return Library()
@@ -293,12 +360,17 @@ class SearchStore:
         return _decode_library(data)
 
     def save_last(self, criteria: SearchCriteria) -> None:
+        """ロックを取って直近条件だけを更新する。名前付き条件は保つ。"""
         with self._lock():
             library = self.load()
             library.last = criteria
             self._write(library)
 
     def save_named(self, name: str, criteria: SearchCriteria) -> None:
+        """ロックを取って名前付き条件を追加・更新する。
+
+        名前は `_check_name` の制約。64件を超える場合は SearchError("many")。
+        """
         _check_name(name)
         with self._lock():
             library = self.load()
@@ -308,6 +380,7 @@ class SearchStore:
             self._write(library)
 
     def delete_named(self, name: str) -> None:
+        """ロックを取って名前付き条件を削除する。無ければ SearchError("missing")。"""
         _check_name(name)
         with self._lock():
             library = self.load()
@@ -317,6 +390,10 @@ class SearchStore:
             self._write(library)
 
     def _lock(self):
+        """searches.lock を 0600 で開き、非ブロッキングの排他ロックを取る。
+
+        取得できなければ SearchError("storage", WouldBlock)。戻り値は with 用の _Lock。
+        """
         try:
             self.base._ensure_directory()
         except StorageError as error:
@@ -350,6 +427,10 @@ class SearchStore:
         return _Lock(fd)
 
     def _write(self, library: Library) -> None:
+        """Library を searches.json に書く。
+
+        version 1、last、名前順の named。128KiB 超は invalid。0600 の原子的置換。
+        """
         named = {
             name: criteria.to_file_dict()
             for name, criteria in sorted(library.named.items(), key=lambda item: item[0])
@@ -371,22 +452,29 @@ class SearchStore:
 
 
 class _Lock:
+    """searches.lock の fd を with 終了時に閉じる。"""
+
     def __init__(self, fd: int) -> None:
+        """ロック済みの fd を保持する。"""
         self.fd = fd
 
     def __enter__(self) -> _Lock:
+        """with の本体へ自分を返す。"""
         return self
 
     def __exit__(self, *_) -> None:
+        """fd を閉じてロックを解放する。"""
         os.close(self.fd)
 
 
 def _regular(metadata: os.stat_result) -> None:
+    """通常ファイルでリンクでないことを要求する。違反は StorageError("path")。"""
     if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
         raise StorageError("path")
 
 
 def _sync_directory(directory: Path) -> None:
+    """ディレクトリを fsync し、rename を永続化する。"""
     fd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(fd)
@@ -395,6 +483,11 @@ def _sync_directory(directory: Path) -> None:
 
 
 def _atomic_write(directory: Path, path: Path, payload: bytes) -> None:
+    """0600 の一時ファイルに書いて fsync し、os.replace で原子的に置き換える。
+
+    失敗時は一時ファイルを消し、成功後は os.chmod で 0600 にしてから
+    ディレクトリを fsync する。
+    """
     tmp = directory / f".{path.name}.{os.getpid()}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -416,6 +509,11 @@ def _atomic_write(directory: Path, path: Path, payload: bytes) -> None:
 
 
 def _decode_session(data: bytes) -> MemberSession:
+    """session.json の bytes を MemberSession にする。
+
+    version 1 と {"version","session":{"token"}} だけを許す。未知 version は
+    "version"、形・値の不正は "invalid"。
+    """
     try:
         value = json.loads(data.decode())
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -439,6 +537,12 @@ def _decode_session(data: bytes) -> MemberSession:
 
 
 def _decode_library(data: bytes) -> Library:
+    """searches.json の bytes を Library にする。
+
+    version 1、last、named だけを許す。名前は `_check_name`、条件は
+    `criteria_from_file` で検証する。形式・値の不正は SearchError("storage")。
+    サイズの検査は `SearchStore.load` と `_write` が行う。
+    """
     try:
         value = json.loads(data.decode())
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -472,6 +576,9 @@ def _decode_library(data: bytes) -> Library:
 
 
 def _check_name(name: str) -> None:
+    """条件名を検証する。空・前後空白・制御文字・64文字超・256バイト超は
+    SearchError("name")。
+    """
     if (
         not name
         or name != name.strip()
