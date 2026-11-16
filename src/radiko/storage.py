@@ -289,7 +289,7 @@ class SessionStore:
         return True
 
     def _ensure_directory(self) -> None:
-        """保存先を 0700 で作り直し、権限とリンクを確認する。"""
+        """保存先が無ければ 0700 で作り、既存なら権限とリンクだけを確認する。"""
         if self._directory_exists():
             return
         try:
@@ -485,7 +485,8 @@ def _sync_directory(directory: Path) -> None:
 def _atomic_write(directory: Path, path: Path, payload: bytes) -> None:
     """0600 の一時ファイルに書いて fsync し、os.replace で原子的に置き換える。
 
-    失敗時は一時ファイルを消し、成功後は 0600 を再確認してディレクトリを fsync する。
+    失敗時は一時ファイルを消し、成功後は os.chmod で 0600 にしてから
+    ディレクトリを fsync する。
     """
     tmp = directory / f".{path.name}.{os.getpid()}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -538,8 +539,9 @@ def _decode_session(data: bytes) -> MemberSession:
 def _decode_library(data: bytes) -> Library:
     """searches.json の bytes を Library にする。
 
-    version 1、last、named だけを許し、名前と条件は criteria_from_file で検証する。
-    形式・値・サイズの不正は SearchError("storage")。
+    version 1、last、named だけを許す。名前は `_check_name`、条件は
+    `criteria_from_file` で検証する。形式・値の不正は SearchError("storage")。
+    サイズの検査は `SearchStore.load` と `_write` が行う。
     """
     try:
         value = json.loads(data.decode())
