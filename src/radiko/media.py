@@ -25,11 +25,15 @@ _WORD = struct.Struct(">I")
 
 
 class AacError(Exception):
+    """AAC の解析・復号の失敗。`code` で種類を表し、利用者向け文言は `str()` が返す。"""
+
     def __init__(self, code: str) -> None:
+        """失敗コードを覚え、`str(self)` を例外メッセージにする。"""
         self.code = code
         super().__init__(str(self))
 
     def __str__(self) -> str:
+        """code に対応する日本語メッセージを返す。定義済みの code だけを扱う。"""
         return {
             "cancelled": "AACデコードを取り消しました",
             "large": "AACセグメントのサイズ上限を超えました",
@@ -52,11 +56,16 @@ class AacError(Exception):
         }[self.code]
 
     def __eq__(self, other: object) -> bool:
+        """code が同じなら等しい。メッセージや引数は比較しない。"""
         return isinstance(other, AacError) and self.code == other.code
 
 
 @dataclass
 class AacSummary:
+    """AAC セグメントの要約。コアの rate/channels と復号後の rate/channels、packets/frames、
+    SBR・ステレオ拡張の有無、PCM の非ゼロ数、再生時間と復号時間を持つ。
+    """
+
     core_sample_rate: int
     core_channels: int
     sample_rate: int
@@ -73,15 +82,20 @@ class AacSummary:
 
 @dataclass
 class DecodedPcm:
+    """復号済み PCM と要約。`samples` は float32 のインターリーブ配列。"""
+
     summary: AacSummary
     samples: np.ndarray
 
     def __repr__(self) -> str:
+        """要約だけを出し、PCM は REDACTED にする。"""
         return f"DecodedPcm(summary={self.summary!r}, samples=[REDACTED])"
 
 
 @dataclass
 class _Frame:
+    """ADTS 1フレーム。object_type・sample_rate・channels と、ヘッダーを除いた payload を持つ。"""
+
     object_type: int
     sample_rate: int
     channels: int
@@ -106,6 +120,7 @@ def id3_offset(data: bytes) -> int | None:
 
 
 def audio_offset(data: bytes) -> int:
+    """ID3v2 を飛ばした音声先頭を返す。タグが不正なら AacError("metadata")。"""
     offset = id3_offset(data)
     if offset is None:
         raise AacError("metadata")
@@ -113,6 +128,9 @@ def audio_offset(data: bytes) -> int:
 
 
 def split_adts(data: bytes, cancelled) -> list[_Frame]:
+    """ADTS をフレームへ分割する。8MB 上限、ID3 を読み飛ばし、途中で切れたフレームや
+    CRC付き・複数 raw block は拒否する。返す payload はコピー。
+    """
     if cancelled():
         raise AacError("cancelled")
     if len(data) > MAX_SEGMENT_BYTES:
@@ -187,6 +205,9 @@ def _walk_adts(view, total: int, pos: int, cancelled, frames, strict: bool):
 
 
 def _parse_adts(data) -> dict:
+    """ADTS ヘッダーを1つ読む。同期・layer・rate index を検証し、CRC の有無で
+    header_len を 7/9 にした辞書を返す。フレーム長や後続の整合は見ない。
+    """
     if data[0] != 0xFF or data[1] & 0xF0 != 0xF0:
         raise AacError("header")
     if (data[1] >> 1) & 0x3 != 0:
@@ -212,11 +233,15 @@ class AdtsDecoder:
     """セグメントをまたいで形式を覚え、失敗したら状態を捨てる。"""
 
     def __init__(self) -> None:
+        """形式の記憶を空で開始する。"""
         self.format: tuple[int, int, int] | None = None
 
     def decode_segment_pcm(
         self, data: bytes, declared: str | None = None, cancelled=None
     ) -> DecodedPcm:
+        """1セグメントを復号し、要約と PCM を返す。8MB・PCM 4MB の上限、ID3、ADTS の
+        形式混在、宣言された HE-AAC と SBR の不一致を検証する。失敗時は記憶を捨てる。
+        """
         cancelled = cancelled or (lambda: False)
         try:
             if cancelled():
@@ -267,6 +292,9 @@ class AdtsDecoder:
 
 
 def _decode_adts(data: bytes | memoryview) -> tuple[np.ndarray, int, int]:
+    """PyAV で ADTS を復号し、float32 のインターリーブ PCM と rate/channels を返す。
+    フレームが無ければ empty、PyAV の失敗は decode にする。
+    """
     try:
         container = av.open(io.BytesIO(data), format="aac", mode="r")
     except av.FFmpegError as error:
@@ -297,6 +325,9 @@ def _decode_adts(data: bytes | memoryview) -> tuple[np.ndarray, int, int]:
 
 
 def validate_mp4(data: bytes) -> None:
+    """MP4 の箱構造と上限を検証する。先頭が既知の箱なら再帰走査し、RIFF/WAVE は通す。
+    箱でなければ先頭1MB+16バイトの ftyp を探し、見つかった位置から走査する。
+    """
     if not _looks_like_box(data):
         if data.startswith(b"RIFF") and data[8:12] == b"WAVE":
             return
@@ -313,10 +344,12 @@ def validate_mp4(data: bytes) -> None:
 
 
 def _looks_like_box(data: bytes) -> bool:
+    """先頭8バイトの箱種別が、検証対象のトップレベル箱かどうか。"""
     return data[4:8] in {b"ftyp", b"styp", b"moov", b"moof", b"mdat", b"free", b"skip", b"wide"}
 
 
 def _word(data, offset: int) -> int:
+    """オフセットの big-endian uint32 を返す。4バイト未満なら AacError("container")。"""
     try:
         return _WORD.unpack_from(data, offset)[0]
     except struct.error as error:
@@ -324,6 +357,9 @@ def _word(data, offset: int) -> int:
 
 
 def _walk(data, depth: int, boxes: int, samples: int) -> tuple[int, int]:
+    """箱を再帰的に走査し、(箱数, sample 数) を返す。深さ17以上は container、箱8192超・sample 4096超は many。
+    trun/stsz/stz2 と stts の展開数も数え、サイズや入れ子の不整合は container。
+    """
     if depth > 16:
         raise AacError("container")
     view = memoryview(data)
