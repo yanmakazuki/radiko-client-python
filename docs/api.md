@@ -85,7 +85,7 @@ HLS メディアプレイリストの窓。
 - [`parse_media_playlist`](../src/radiko/hls.py#L273): メディアプレイリストを解析して検証する。
 - [`segment_schedule`](../src/radiko/hls.py#L193): EXTINF と PROGRAM-DATE-TIME を1パスで畳み込み、添字参照できる表にする。
 - [`live_join_index`](../src/radiko/hls.py#L252): 終端から target duration の3倍以内に始まる最も古いセグメント。
-- [`parse_master_codec`](../src/radiko/hls.py#L361): マスタープレイリストの最初の STREAM-INF から CODECS を返す。
+- [`parse_master_codec`](../src/radiko/hls.py#L361): マスタープレイリストの CODECS を持つ最初の STREAM-INF から CODECS を返す。
 
 ### [radiko.media](../src/radiko/media.py)
 
@@ -168,7 +168,7 @@ session.json と searches.json。
 表示幅と書記素。
 
 - [`graphemes`](../src/radiko/text.py#L35): 拡張書記素クラスタ。
-- [`display_width`](../src/radiko/text.py#L42): 制御文字は 0、全角と全幅は 2、それ以外の可視クラスタは 1。
+- [`display_width`](../src/radiko/text.py#L42): 表示幅0の文字（結合文字・書式文字・C0とDEL）は0、全角と全幅は2、それ以外の可視クラスタは1。
 - [`clean_text`](../src/radiko/text.py#L84): 空白は一つに畳み、Cc の制御文字は捨てる。
 
 ### [radiko.timing](../src/radiko/timing.py)
