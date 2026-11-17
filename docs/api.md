@@ -168,7 +168,7 @@ session.json と searches.json。
 表示幅と書記素。
 
 - [`graphemes`](../src/radiko/text.py#L35): 拡張書記素クラスタ。
-- [`display_width`](../src/radiko/text.py#L42): 表示幅0の文字（結合文字・書式文字・C0とDEL）は0、全角と全幅は2、それ以外の可視クラスタは1。
+- [`display_width`](../src/radiko/text.py#L42): 表示幅0の文字（結合文字・書式文字・C0とDEL）は0、全角と全幅は2、それ以外のクラスタは1。
 - [`clean_text`](../src/radiko/text.py#L84): 空白は一つに畳み、Cc の制御文字は捨てる。
 
 ### [radiko.timing](../src/radiko/timing.py)
