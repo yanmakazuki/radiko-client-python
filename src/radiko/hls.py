@@ -13,6 +13,10 @@ MAX_ITEMS = 4096
 
 @dataclass
 class Segment:
+    """HLS の1セグメント。URI・継続時間と、このセグメントから効く DISCONTINUITY・
+    PROGRAM-DATE-TIME・MAP・KEY の状態を持つ。BYTERANGE・暗号化・不正 MAP は検証で拒否する印。
+    """
+
     uri: str
     duration: float
     discontinuity: bool = False
@@ -25,6 +29,10 @@ class Segment:
 
 @dataclass
 class MediaPlaylist:
+    """メディアプレイリストの窓。先頭セグメントの通し番号・target_duration・ENDLIST・
+    不連続番号・version・宣言コーデックを持つ。
+    """
+
     media_sequence: int
     target_duration: int
     segments: list[Segment]
@@ -63,6 +71,7 @@ class HlsCursor:
 
     @classmethod
     def start(cls, media: MediaPlaylist, live: bool) -> HlsCursor:
+        """検証済みの窓からカーソルを作る。ライブなら live_join_index まで進めて開始する。"""
         validate_media(media)
         cursor = cls(live, media, media.media_sequence)
         if live:
@@ -70,6 +79,9 @@ class HlsCursor:
         return cursor
 
     def install(self, media: MediaPlaylist) -> float:
+        """新しい窓を取り込み、次に取得するまでの待ち秒を返す。VOD は開始番号が戻れば playlist、
+        next_sequence が窓より前なら window。ライブは巻き戻り・前進を再配置する。
+        """
         validate_media(media)
         previous = self.media.media_sequence
         if media.media_sequence < previous and not self.live:
@@ -88,6 +100,7 @@ class HlsCursor:
         return wait
 
     def take(self) -> Segment | None:
+        """次のセグメントを返して通し番号を進める。窓の外なら None を返し、位置は変えない。"""
         start = self.media.media_sequence
         end = start + len(self.media.segments)
         if not start <= self.next_sequence < end:
@@ -98,6 +111,9 @@ class HlsCursor:
         return segment
 
     def _live_realignment(self, previous: int) -> bool | None:
+        """ライブの窓更新で再配置が必要か返す。巻き戻りが古ければ None、それ以外の巻き戻りは True。
+        前進は窓より大きい欠落なら True、そうでなければ False。
+        """
         start = self.media.media_sequence
         length = len(self.media.segments)
         end = start + length
@@ -110,6 +126,9 @@ class HlsCursor:
         return None
 
     def _rewind_is_stale(self, start: int, end: int, length: int) -> bool:
+        """巻き戻った窓が next_sequence を含むか、next_sequence がその末尾、または直近の再生位置が
+        窓の終端付近なら True。古い窓として無視する。
+        """
         contains_next = start <= self.next_sequence < end
         if contains_next or end == self.next_sequence:
             return True
@@ -121,6 +140,9 @@ class HlsCursor:
         return self.last_played >= tail and self.last_played - tail <= length
 
     def _realign(self, reset: bool) -> None:
+        """ライブ端へ再配置する。reset ならリセット回数を増やし、飛ばした数と通知を更新する。
+        joined_head は窓の先頭に参加したか、pending_discontinuity は次の再生前に通知する印。
+        """
         index = live_join_index(self.media)
         target = self.media.media_sequence + index
         skipped = index if reset else target - self.next_sequence
@@ -141,6 +163,9 @@ class HlsCursor:
 
 
 def validate_media(media: MediaPlaylist) -> None:
+    """窓の前提を検証する。空・4096超、target 0以下/60超、i-frames-only、各セグメントの
+    duration 0以下/120超・URI 欠落・BYTERANGE・暗号化・不正 MAP、開始番号の負数・64bit 超を拒否。
+    """
     if (
         not media.segments
         or len(media.segments) > MAX_ITEMS
@@ -218,6 +243,9 @@ def segment_discontinuity(media: MediaPlaylist, sequence: int) -> int | None:
 
 
 def _parse_program_date(text: str) -> datetime:
+    """PROGRAM-DATE-TIME の ISO 8601 を datetime にする。末尾の Z は UTC として扱い、
+    不正な形式は ValueError。
+    """
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
@@ -238,10 +266,14 @@ def live_join_index(media: MediaPlaylist) -> int:
 
 
 def _forward_gap_is_reset(next_sequence: int, media: MediaPlaylist) -> bool:
+    """next_sequence が新しい窓の手前へ窓長より大きく離れたら True。ライブ端へ再配置する。"""
     return media.media_sequence - next_sequence > len(media.segments)
 
 
 def parse_media_playlist(text: str) -> MediaPlaylist:
+    """メディアプレイリストを解析して検証する。1MB 上限、#EXTM3U、TARGETDURATION を必須にする。
+    DISCONTINUITY と PROGRAM-DATE-TIME は次の1セグメント、MAP と KEY は以降へ引き継ぐ。
+    """
     if len(text.encode()) > TEXT_LIMIT:
         raise ProbeError("large")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -327,6 +359,7 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
 
 
 def parse_master_codec(text: str) -> str | None:
+    """マスタープレイリストの最初の STREAM-INF から CODECS を返す。宣言が無ければ None。"""
     for line in text.splitlines():
         if line.startswith("#EXT-X-STREAM-INF:") and "CODECS=" in line:
             raw = parse_attribute(line, "CODECS")
