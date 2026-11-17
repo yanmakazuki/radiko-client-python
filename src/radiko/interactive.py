@@ -8,7 +8,10 @@ from radiko.stream import parse_time, validate_station
 
 
 class InteractiveControl:
+    """対話再生の状態。放送枠の長さ・モード・音量・位置・停止と、受理済みのシーク要求を持つ。"""
+
     def __init__(self, duration: float, mode: str = "timefree", station: str = "TBS"):
+        """放送枠の長さとモードから初期状態を作る。音量25、位置0、未停止。"""
         self.duration = duration
         self.mode = mode
         self.station = station
@@ -23,6 +26,9 @@ class InteractiveControl:
         self.selected: tuple[str, str, datetime, float] | None = None
 
     def handle(self, line: str) -> None:
+        """1行のコマンドを解釈し、停止・音量・シーク・局切替の順に処理する。
+        未知の入力は案内だけ返す。
+        """
         text = line.strip()
         if self._handle_stop_pause(text):
             return
@@ -105,6 +111,7 @@ class InteractiveControl:
         guidance = "live 局ID / timefree 局ID YYYYMMDDHHmmss [--offset 秒数] を指定してください"
 
         def reject() -> bool:
+            """局指定の形式が不正なときに案内を出して True を返す。"""
             self.messages.append(guidance)
             return True
 
@@ -144,6 +151,7 @@ class InteractiveControl:
         return True
 
     def _seek(self, target: float) -> None:
+        """タイムフリーの範囲内だけ受理する。範囲外は現在の再生を続け、案内を出す。"""
         if self.mode != "timefree" or not 0 <= target < self.duration:
             self.messages.append(
                 "シーク不可: タイムフリーの放送枠内を指定してください（再生を継続）"
@@ -152,11 +160,13 @@ class InteractiveControl:
         self._request(target)
 
     def _request(self, position: float) -> None:
+        """位置を受理済みにし、世代を進める。古い完了通知を捨てるための番号。"""
         self.generation += 1
         self.position = position
         self.accepted.append(position)
 
     def complete(self, generation: int, position: float) -> bool:
+        """世代が現在と一致するときだけ位置を反映する。古い要求の完了は False。"""
         if generation != self.generation:
             return False
         self.position = position
