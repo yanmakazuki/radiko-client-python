@@ -21,7 +21,10 @@ from radiko.urls import transport_url
 
 
 class Reply:
+    """HTTP 応答。ヘッダー名は小文字に揃え、`url` はリダイレクト後の最終 URL。"""
+
     def __init__(self, status: int, body: bytes, headers: dict[str, str], url: str) -> None:
+        """ステータス・本文・ヘッダー・最終 URL を保持する。ヘッダー名は小文字にする。"""
         self.status = status
         self.body = body
         self.headers = {key.lower(): value for key, value in headers.items()}
@@ -32,6 +35,9 @@ _TRUSTED_SUFFIXES = ("radiko.jp", "radiko-cf.com", "smartstream.ne.jp")
 
 
 def _allowed(url: str) -> None:
+    """URL の送信先を検証する。認証情報付き URL は拒否し、http は 127.0.0.1 の明示ポートのみ、
+    https は radiko.jp / radiko-cf.com / smartstream.ne.jp とそのサブドメインだけを許可する。
+    """
     parsed = urlparse(url)
     if parsed.username or parsed.password:
         raise ProbeError("unsafe")
@@ -48,6 +54,10 @@ def _allowed(url: str) -> None:
 
 
 class _StaleConnection(Exception):
+    """接続再利用時の切断を表す内部例外。現行実装では送出せず、切断は http.client の例外から
+    ProbeError("network") へ写す。
+    """
+
     pass
 
 
@@ -55,11 +65,15 @@ class _ConnectionPool:
     """(scheme, host, port) ごとのアイドル接続。"""
 
     def __init__(self) -> None:
+        """アイドル接続の辞書とロックを用意する。キーごとに最大4本まで保持する。"""
         self._lock = threading.Lock()
         self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
         self.max_idle = 4
 
     def acquire(self, key, timeout: float, fresh: bool = False):
+        """キーの接続を取り出す。fresh でなければアイドルを LIFO で再利用し、無ければ新規に作る。
+        再利用時は timeout を現在の値へ更新する。
+        """
         if not fresh:
             with self._lock:
                 connections = self._idle.get(key)
@@ -75,6 +89,7 @@ class _ConnectionPool:
         return http.client.HTTPConnection(host, port, timeout=timeout)
 
     def release(self, key, connection) -> None:
+        """接続をアイドルへ戻す。既に4本あるキーでは close して捨てる。"""
         with self._lock:
             connections = self._idle.setdefault(key, [])
             if len(connections) >= self.max_idle:
@@ -86,6 +101,7 @@ class _ConnectionPool:
             connection.close()
 
     def discard(self, connection) -> None:
+        """接続を閉じる。close 自体の OSError は無視する。"""
         try:
             connection.close()
         except OSError:
@@ -96,12 +112,14 @@ _pool = _ConnectionPool()
 
 
 def _key(url: str):
+    """接続プールのキー (scheme, host, port) を返す。ポート省略時は https=443、http=80。"""
     parsed = urlparse(url)
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     return parsed.scheme, parsed.hostname or "", port
 
 
 def _path(url: str) -> str:
+    """リクエスト行に使うパスを返す。空なら "/"、クエリはそのまま付ける。"""
     parsed = urlparse(url)
     path = parsed.path or "/"
     if parsed.query:
@@ -153,6 +171,9 @@ def _request(
     byte_range: tuple[int, int] | None = None,
     record_delays: bool = False,
 ) -> Reply:
+    """共通のリクエスト。許可ホストを検証し、通信断と 408/5xx を retries 回までやり直す。
+    strict なら _raise_for_status で検査し、返す Reply.url は最終 URL。
+    """
     cancelled = cancelled or (lambda: False)
     current = transport_url(url) if use_transport else url
     _allowed(current)
@@ -198,12 +219,14 @@ def _request(
 
 
 def _retryable(error: ProbeError) -> bool:
+    """やり直してよい ProbeError か。network と http の 408/5xx を対象にする。"""
     if error.code == "network":
         return True
     return error.code == "http" and (error.status == 408 or (error.status or 0) >= 500)
 
 
 def _backoff(attempt: int, cancelled, record: bool) -> None:
+    """指数バックオフで待つ。record なら待ち時間を contextvar に記録する。"""
     delay = _retry_delay_ms(attempt) / 1000
     if record:
         recorded = _transport_delays.get()
@@ -226,6 +249,9 @@ def _exchange_chain(
     retry_stale: bool,
     record_delays: bool,
 ) -> tuple[int, dict[str, str], bytes, str]:
+    """リダイレクトを追って1回の交換を完了する。301/302/303/307/308 を最大4回まで追い、
+    POST の 301/302/303 は GET に変える。各遷移先を再検証し、Range は引き継がない。
+    """
     current = url
     hops = 0
     while True:
@@ -273,6 +299,9 @@ def _exchange(
     record_delays: bool,
 ) -> tuple[int, dict[str, str], bytes]:
     # GET だけ接続の使い回しで切れた場合に1回やり直す。POST は二重送信を避けて再送しない。
+    """1 URL の交換。GET は stale 接続なら1回だけ接続を取り直して再送し、POST は二重送信を避けて
+    再送しない（常に新規接続）。応答は上限まで読み、再利用可能ならプールへ返す。
+    """
     attempts = 2 if retry_stale else 1
     for attempt in range(attempts):
         key = _key(url)
@@ -327,6 +356,7 @@ def _exchange(
 
 
 def _reusable(response, headers: dict[str, str]) -> bool:
+    """応答後に接続をプールへ戻せるか。Connection: close か will_close なら戻さない。"""
     if response.will_close:
         return False
     if headers.get("connection", "").lower() == "close":
@@ -335,6 +365,7 @@ def _reusable(response, headers: dict[str, str]) -> bool:
 
 
 def _read_limited(response, limit: int, cancelled) -> bytes:
+    """本文を最大 limit バイトまで読む。超えたら ProbeError("large")、キャンセルは cancelled。"""
     chunks = []
     total = 0
     while total <= limit:
@@ -375,6 +406,9 @@ def post_form(
 
 
 def catalog_fetch(url: str) -> bytes:
+    """番組表を取得して gzip を解凍する。4MB 上限、通信は最大3回再試行し、
+    失敗は CatalogError（cancelled / network / large / limited / http）に写す。
+    """
     try:
         reply = get(url, {"accept-encoding": "gzip, identity"}, limit=4 * 1024 * 1024, retries=3)
     except ProbeError as error:
@@ -460,6 +494,9 @@ def stream_get(
 
 
 def _raise_for_status(status: int, ranged: bool) -> None:
+    """配信 GET のステータスを検査する。200（非 Range）と 206（Range）以外は
+    401 authentication / 403 denied / 404 not-found / 429 limited / その他 http。
+    """
     if status == 200 and not ranged:
         return
     if status == 206 and ranged:
