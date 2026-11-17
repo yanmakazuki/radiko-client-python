@@ -40,7 +40,7 @@ def graphemes(text: str) -> list[str]:
 
 
 def display_width(text: str) -> int:
-    """制御文字は 0、全角と全幅は 2、それ以外の可視クラスタは 1。曖昧幅は 1。"""
+    """表示幅0の文字（結合文字・書式文字・C0とDEL）は0、全角と全幅は2、それ以外の可視クラスタは1。曖昧幅は1。"""
     if text.isascii() and text.isprintable():
         return len(text)
     width = 0
