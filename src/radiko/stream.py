@@ -10,6 +10,10 @@ from radiko.storage import Membership
 
 
 class ProbeError(Exception):
+    """配信の検証・取得の失敗。`code` に種類、HTTP なら `status`、処理段階なら `stage`、
+    包んだ元の失敗を `inner` に持つ。
+    """
+
     def __init__(
         self,
         code: str,
@@ -17,6 +21,7 @@ class ProbeError(Exception):
         stage: str | None = None,
         inner: ProbeError | None = None,
     ):
+        """失敗コードと、HTTP ステータス・段階・内側の例外を覚える。"""
         self.code = code
         self.status = status
         self.stage = stage
@@ -24,14 +29,17 @@ class ProbeError(Exception):
         super().__init__(str(self))
 
     def at(self, stage: str) -> ProbeError:
+        """この失敗を `stage` の文脈で包んだ新しい ProbeError("at") を返す。元は inner に残す。"""
         return ProbeError("at", stage=stage, inner=self)
 
     def __str__(self) -> str:
+        """at は「段階: 内側」、それ以外は code に対応する日本語メッセージを返す。"""
         if self.code == "at" and self.inner is not None and self.stage is not None:
             return f"{self.stage}: {self.inner}"
         return _TEXT.get(self.code, "配信の検証中に通信に失敗しました").format(status=self.status)
 
     def __eq__(self, other: object) -> bool:
+        """code・status・文字列表現が同じなら等しい。inner は文字列表現を通して比較される。"""
         return isinstance(other, ProbeError) and (self.code, self.status, str(self)) == (
             other.code,
             other.status,
@@ -78,6 +86,7 @@ _TEXT = {
 
 
 def parse_time(text: str) -> datetime:
+    """YYYYMMDDHHmmss の14桁を JST の datetime にする。桁数・数字以外・日付不正は input。"""
     if len(text) != 14 or not text.isascii() or not text.isdigit():
         raise ProbeError("input")
     try:
@@ -95,6 +104,7 @@ def parse_time(text: str) -> datetime:
 
 
 def validate_station(station: str) -> None:
+    """局IDを検証する。空・32文字超・ASCII 大文字/数字/-/_ 以外は input。"""
     if (
         not station
         or len(station) > 32
@@ -115,6 +125,8 @@ def morning_after_end_broadcast_day(end: datetime) -> datetime:
 
 @dataclass
 class SlotProgram:
+    """番組表の1枠。開始・終了、タイムフリー可否の4値、収録失敗、タイトルを持つ。"""
+
     start: datetime
     end: datetime
     timefree: tuple[bool | None, bool | None, bool | None, bool | None]
@@ -123,6 +135,9 @@ class SlotProgram:
 
 
 def eligible(program: SlotProgram, timefree: bool, now: datetime, membership: Membership) -> None:
+    """再生時点の可否を判定する。放送前は upcoming、ライブは終了後 program、タイムフリーは
+    放送中 on-air、期限切れ expired、無料期限後の未契約 contract。
+    """
     if now < program.start:
         raise ProbeError("upcoming")
     if not timefree:
@@ -141,6 +156,9 @@ def eligible(program: SlotProgram, timefree: bool, now: datetime, membership: Me
 
 
 def area_contract(outside_area: bool, area_free: bool | None) -> ProbeError | None:
+    """エリア外の契約判定。域内か area_free=True なら None、契約なし False は outside、
+    未確認 None は contract。
+    """
     if not outside_area or area_free is True:
         return None
     if area_free is False:
@@ -149,6 +167,9 @@ def area_contract(outside_area: bool, area_free: bool | None) -> ProbeError | No
 
 
 def availability(program: SlotProgram, now: datetime, outside: bool) -> None:
+    """番組情報のタイムフリー可否を見る。failed_record が True なら unavailable、None なら unknown。
+    timefree は域内/域外と7日期限の前後を添字にし、True は可、False は unavailable、None は unknown。
+    """
     if program.failed_record is True:
         raise ProbeError("unavailable")
     if program.failed_record is None:
@@ -165,5 +186,6 @@ def availability(program: SlotProgram, now: datetime, outside: bool) -> None:
 
 
 def deadline_pair(end: datetime) -> tuple[str, str]:
+    """無料期限（放送日の翌日05:00+7日）と有料期限（+30日）を RFC3339 で返す。"""
     base = morning_after_end_broadcast_day(end)
     return rfc3339(base + timedelta(days=7)), rfc3339(base + timedelta(days=30))
