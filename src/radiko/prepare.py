@@ -62,6 +62,7 @@ class ResolvedProgram:
     station_id: str
 
     def slot(self) -> SlotProgram:
+        """カタログ層の SlotProgram に変換する。"""
         return SlotProgram(self.start, self.end, self.timefree, self.failed_record)
 
 
@@ -101,6 +102,7 @@ class ProbeReport:
     title: str | None
 
     def __repr__(self) -> str:
+        """局とモードだけを出し、サンプル配列は REDACTED にする。"""
         return f"ProbeReport(station={self.station!r}, mode={self.mode!r}, samples=[REDACTED])"
 
 
@@ -133,6 +135,7 @@ class ChapterFailure(Exception):
     """チャプター取得の失敗。メッセージはそのまま利用者向けに表示できる。"""
 
     def __init__(self, text: str) -> None:
+        """利用者向けメッセージをそのまま例外メッセージにする。"""
         super().__init__(text)
 
 
@@ -179,6 +182,7 @@ def fetch_program(station: str, cursor: datetime, cancelled) -> ResolvedProgram:
 
 
 def _rfc3339_secs(moment: datetime) -> str:
+    """秒精度の RFC3339（...Z）にする。タイムゾーンは変換しない。"""
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -212,6 +216,7 @@ def parse_program(data: bytes, station: str, cursor: datetime) -> ResolvedProgra
     conditions = value.get("blackout") if isinstance(value.get("blackout"), dict) else None
 
     def read_flag(key: str) -> int | None:
+        """blackout の条件値を整数で返す。真偽値・欠落・数値でない文字列は None。"""
         if not conditions or key not in conditions:
             return None
         raw = conditions[key]
@@ -227,6 +232,7 @@ def parse_program(data: bytes, station: str, cursor: datetime) -> ResolvedProgra
         return None
 
     def allowed(key: str) -> bool | None:
+        """blackout の 0 を可、2 を不可、それ以外を未確認（None）にする。"""
         flag = read_flag(key)
         if flag == 0:
             return True
@@ -272,6 +278,7 @@ def parse_program(data: bytes, station: str, cursor: datetime) -> ResolvedProgra
 
 
 def _time_field(value: dict, key: str) -> datetime:
+    """ISO 8601 の時刻フィールドを datetime にする。文字列でない・不正・TZ なしは program。"""
     text = value.get(key)
     if not isinstance(text, str):
         raise ProbeError("program")
@@ -288,6 +295,7 @@ def authenticate_stream(session: MemberSession, cancelled) -> tuple[dict[str, st
     """stream_get を fetch に載せるだけ。手順は radiko.auth.authenticate に一つだけ。"""
 
     def fetch(path: str, headers: dict[str, str]):
+        """認証 API を stream_get で叩き、応答を返す。64KB 上限とキャンセルを渡す。"""
         return stream_get(f"{API}{path}", headers, limit=64 * 1024, cancelled=cancelled)
 
     return auth.authenticate(fetch, session)
@@ -354,6 +362,7 @@ def prepare(
 
 
 def _local_station(area: str, station: str, cancelled) -> bool:
+    """エリアの局一覧を取得し、station が含まれるか返す。XML 不正は xml。"""
     reply = stream_get(
         f"https://radiko.jp/v3/station/list/{area}.xml",
         limit=TEXT_LIMIT,
@@ -369,6 +378,9 @@ def _local_station(area: str, station: str, cancelled) -> bool:
 def _playlist_url(
     target: str, station: str, mode: str, program: ResolvedProgram, outside: bool, position: float
 ) -> str:
+    """配信先 URL に station_id・lsid・l（timefree=60 / live=15）・type（域外=c / 域内=b）を付け、
+    timefree は番組時刻、seek は10秒手前を足す。
+    """
     lsid = secrets.token_hex(16)
     pairs = [
         ("station_id", station),
@@ -418,6 +430,7 @@ def inspect_hls(url: str, headers: dict[str, str], retain: bool, cancelled) -> P
 
 
 def _session_encrypted(text: str) -> bool:
+    """マスターの SESSION-KEY に NONE 以外の METHOD があれば True。"""
     for line in text.splitlines():
         if line.startswith("#EXT-X-SESSION-KEY:"):
             method = parse_attribute(line, "METHOD")
@@ -427,6 +440,9 @@ def _session_encrypted(text: str) -> bool:
 
 
 def _master_target(text: str, base: str) -> tuple[str | None, str]:
+    """マスターから I-FRAMES-ONLY を除いた最小 BANDWIDTH の variant を選び、(CODECS, 絶対 URI) を返す。
+    AUDIO グループがあればその URI を使う。
+    """
     variants = []
     pending = None
     pending_i_frames = False
@@ -465,6 +481,7 @@ def _master_target(text: str, base: str) -> tuple[str | None, str]:
 
 
 def _safe_codec(text: str | None) -> str | None:
+    """CODECS を表示・比較用に制限する。100文字超や ASCII 英数と .,-_ 以外なら None。"""
     if text is None:
         return None
     return (
@@ -476,6 +493,7 @@ def _safe_codec(text: str | None) -> str | None:
 
 
 def _bandwidth(line: str) -> int:
+    """BANDWIDTH を整数で返す。無い・不正なら 0（最小選択では最優先）。"""
     raw = parse_attribute(line, "BANDWIDTH") or "0"
     try:
         return int(raw)
@@ -484,6 +502,7 @@ def _bandwidth(line: str) -> int:
 
 
 def _join(base: str, uri: str) -> str:
+    """base を基準に uri を絶対 URL にする。"""
     return urljoin(base, uri)
 
 
@@ -615,6 +634,7 @@ def _decode_sample(
 def _sample(
     media, playlist_url: str, headers, codec, retain: bool, cancelled, encrypted: bool = False
 ) -> ProbeReport:
+    """先頭セグメント（と init）を取得・復号し、番組メタデータ以外を埋めた ProbeReport を返す。"""
     first = media.segments[0]
     sample, segment = _fetch_sample_blob(media, playlist_url, headers, cancelled)
     blob = sample + segment
@@ -755,6 +775,7 @@ def _apply_seek(control, media, sequence: int, media_seconds: float, origin: dat
 
 
 def _segment_at(media, sequence: int):
+    """通し番号のセグメントを返す。窓の外なら None。"""
     start = media.media_sequence
     if sequence < start or sequence >= start + len(media.segments):
         return None
@@ -762,6 +783,7 @@ def _segment_at(media, sequence: int):
 
 
 def _segment_discontinuity(media, sequence: int):
+    """通し番号の累積不連続番号を返す。窓の外なら None。"""
     return segment_discontinuity(media, sequence)
 
 
@@ -778,6 +800,7 @@ def _refresh_playlist(
     """一覧を取り直す。401 は再認証、ライブの失効は source から作り直す。"""
 
     def fetch(target, current_headers):
+        """一覧を取得して解析し、(MediaPlaylist, 最終 URL) を返す。1MB 上限・リダイレクト・再試行付き。"""
         reply = stream_get(
             target,
             current_headers,
@@ -789,6 +812,7 @@ def _refresh_playlist(
         return parse_media_playlist(reply.body.decode()), reply.url
 
     def open_source():
+        """_open_media(source) を呼び、失敗は ProbeError として返す（送出しない）。"""
         try:
             return _open_media(source, headers, cancelled)
         except ProbeError as error:
@@ -838,6 +862,7 @@ def _refresh_playlist(
 
 
 def _playlist_retryable(error) -> bool:
+    """at を1段はがして、not-found / denied / network / http 408・5xx なら True。"""
     current = error.inner if error.code == "at" and error.inner is not None else error
     if current.code in {"not-found", "denied", "network"}:
         return True
@@ -970,6 +995,7 @@ def play_station(
 
 
 def _validate_seek_window(media, program, position: float) -> None:
+    """シーク位置が窓の先頭より前、または 10秒+target_duration+1 より後なら playlist。"""
     first = segment_wall(media, media.media_sequence)
     if first is None:
         raise ProbeError("playlist").at("シーク時刻との対応を確認できません")
@@ -1069,6 +1095,7 @@ def _play_station(
         )
 
         def close_stream() -> None:
+            """出力ストリームを閉じ、フレーム数とアンダーランを累計へ足して未使用にする。"""
             nonlocal stream, played_frames, underrun_frames
             if stream is not None:
                 stream.close()
@@ -1078,6 +1105,7 @@ def _play_station(
                 stream = None
 
         def emit(piece, rate: int, channels: int) -> None:
+            """PCM を出力する。ストリームが無いか rate/channels が変われば開き直し、音量を渡す。"""
             nonlocal stream
             if not len(piece):
                 return
@@ -1087,6 +1115,7 @@ def _play_station(
             stream.write(piece, volume=control.volume)
 
         def drain(*_args) -> None:
+            """操作コマンドを空になるまで処理し、新しい通知を on_notice へ流す。停止・局切替で打ち切る。"""
             while True:
                 line = commands() if callable(commands) else (queue.pop(0) if queue else None)
                 if not line:
@@ -1455,19 +1484,23 @@ class _StopView:
     """
 
     def __init__(self, function) -> None:
+        """停止判定の0引数関数を保持する。"""
         self.function = function
 
     def is_set(self) -> bool:
+        """保持した関数を呼び、停止なら True。"""
         return self.function()
 
 
 def _cancelled_error(error) -> bool:
+    """code が cancelled、または at の inner が cancelled なら True。"""
     return error.code == "cancelled" or (
         error.code == "at" and error.inner is not None and error.inner.code == "cancelled"
     )
 
 
 def _reload_window(source, url, headers, cancelled, media, sequence, mode, control, reauth, played):
+    """target_duration/2（最低50ms）待って一覧を取り直し、窓と次位置を更新する。"""
     wait = max(media.target_duration / 2.0, 0.05)
     end = time.monotonic() + wait
     while True:
@@ -1502,6 +1535,7 @@ def _open_endpoints(urls, headers, cancelled):
 
 
 def _open_media(url: str, headers: dict[str, str], cancelled):
+    """マスターを最大4回たどってメディアプレイリストを開き、(最終 URL, media) を返す。"""
     current = url
     codec = None
     for _ in range(4):
