@@ -18,12 +18,18 @@ CHECK_PATH = "/ap/member/webapi/v2/member/login/check"
 
 
 class AuthError(Exception):
+    """認証の失敗。`code` で種類を、HTTP 由来なら `status` を持つ。
+    利用者向けメッセージにパスワードや応答本文は含めない。
+    """
+
     def __init__(self, code: str, status: int | None = None) -> None:
+        """失敗コードと HTTP ステータスを覚える。`status` は HTTP 由来の失敗だけに入る。"""
         self.code = code
         self.status = status
         super().__init__(str(self))
 
     def __str__(self) -> str:
+        """code に対応する日本語メッセージを返す。未知の code は通信エラーとして扱う。"""
         if self.code == "credentials":
             return "ログインに失敗しました。メールアドレスとパスワードを確認してください"
         if self.code == "expired":
@@ -45,6 +51,7 @@ class AuthError(Exception):
         return "認証サーバーと通信できません"
 
     def __eq__(self, other: object) -> bool:
+        """code と status が同じなら等しい。メッセージや引数は比較しない。"""
         return isinstance(other, AuthError) and (self.code, self.status) == (
             other.code,
             other.status,
@@ -52,6 +59,9 @@ class AuthError(Exception):
 
 
 def auth_base() -> str:
+    """認証 API のベース URL を返す。RADIKO_AUTH_ORIGIN は 127.0.0.1 の http だけ許可し、
+    それ以外は AuthError("network")。未指定なら loopback_origin()、最後に https://radiko.jp。
+    """
     override = os.environ.get("RADIKO_AUTH_ORIGIN")
     if override:
         parsed = urlparse(override)
@@ -70,18 +80,25 @@ def auth_base() -> str:
 
 
 class MemberClient:
+    """会員ログインとセッション確認。通信・待ち・取り消し判定は差し替えられる。"""
+
     def __init__(self, transport=None, sleep=None, cancelled=None) -> None:
+        """通信・待ち・取り消し判定を差し込む。省略時は実 HTTP、待たない、取り消さない。"""
         self.transport = transport
         self.sleep = sleep or (lambda _seconds: None)
         self.cancelled = cancelled or (lambda: False)
 
     @classmethod
     def create(cls, cancelled=None) -> MemberClient:
+        """取り消し済みでなければクライアントを作る。取り消し済みなら AuthError("cancelled")。"""
         if cancelled and cancelled():
             raise AuthError("cancelled")
         return cls(cancelled=cancelled)
 
     def login(self, mail: str, password: str) -> tuple[MemberSession, Membership]:
+        """ログインしてセッションと会員情報を返す。空入力は input、401 は credentials、
+        セッションを読めない応答は format。成功後は check で会員情報を取る。
+        """
         if self.cancelled():
             raise AuthError("cancelled")
         if not mail.strip() or password == "":
@@ -100,6 +117,9 @@ class MemberClient:
         return session, membership
 
     def check(self, session: MemberSession) -> Membership:
+        """保存セッションを確認して会員情報を返す。408/5xx と通信断は最大3回再試行し、
+        400/401 は expired、その他は _success の規則に従う。待ちは 0.1/0.2/0.4 秒。
+        """
         retries = 0
         while True:
             if self.cancelled():
@@ -126,6 +146,7 @@ class MemberClient:
         return parse_membership(response.body)
 
     def _login(self, mail: str, password: str):
+        """ログイン POST を送る。transport があれば優先し、ProbeError は AuthError に写す。"""
         if self.transport is not None:
             return self.transport.login(mail, password)
         try:
@@ -137,6 +158,7 @@ class MemberClient:
         return _HttpResponse(reply.status, reply.body)
 
     def _check(self, session: MemberSession):
+        """セッション確認 GET を送る。transport を優先し、HTTP の再試行はせず ProbeError を写す。"""
         if self.transport is not None:
             return self.transport.check(session)
         try:
@@ -153,12 +175,16 @@ class MemberClient:
 
 
 class _HttpResponse:
+    """`_login` / `_check` が共通して扱う最小の応答。`status` と `body` だけを持つ。"""
+
     def __init__(self, status: int, body: bytes) -> None:
+        """ステータスと本文をそのまま保持する。"""
         self.status = status
         self.body = body
 
 
 def _success(status: int) -> None:
+    """200 以外を失敗にする。429 は limited、それ以外は http(status)。"""
     if status == 200:
         return
     if status == 429:
@@ -167,6 +193,9 @@ def _success(status: int) -> None:
 
 
 def parse_membership(data: bytes) -> Membership:
+    """会員情報の JSON を解析する。status が 200 なら areafree/timefreeplus を真偽値にし、
+    400/401 は expired、それ以外や壊れた JSON は format。
+    """
     try:
         value = json.loads(data.decode())
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -182,6 +211,7 @@ def parse_membership(data: bytes) -> Membership:
 
 
 def _flag(value):
+    """会員フラグを True/False/None に揃える。"1"/1 は True、"0"/0 は False、他は format。"""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -194,6 +224,7 @@ def _flag(value):
 
 
 def _from_probe(error: ProbeError) -> AuthError:
+    """HTTP 層の ProbeError を認証用の AuthError に写す。cancelled と large だけ区別する。"""
     if error.code == "cancelled":
         return AuthError("cancelled")
     if error.code == "large":
@@ -205,6 +236,9 @@ PLAYER_KEY = b"bcd151073c03b352e1ef2fd66c32209da9ca0afa"
 
 
 def partial_key(offset: int, length: int) -> str:
+    """auth1 が示した offset/length で PLAYER_KEY を切り出し、Base64 にする。
+    範囲外や長さ0以下は ProbeError("auth-format")。
+    """
     end = offset + length
     if offset < 0 or length <= 0 or end > len(PLAYER_KEY):
         raise ProbeError("auth-format")
@@ -253,6 +287,7 @@ def authenticate(fetch, session: MemberSession) -> tuple[dict[str, str], str]:
 
 
 def _header(reply, name: str) -> str:
+    """応答ヘッダーを大文字小文字を問わず引く。無ければ ProbeError("auth-format")。"""
     value = reply.headers.get(name.lower()) or reply.headers.get(name)
     if not value:
         raise ProbeError("auth-format")
