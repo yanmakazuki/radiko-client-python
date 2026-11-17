@@ -12,10 +12,12 @@ import numpy as np
 
 
 def box(kind: bytes, payload: bytes) -> bytes:
+    """MP4 の箱を組み立てる。4バイト長 + kind + payload。"""
     return (len(payload) + 8).to_bytes(4, "big") + kind + payload
 
 
 def words(*values: int) -> bytes:
+    """整数を big-endian の4バイト列に並べる。合成 MP4 のフィールド用。"""
     return b"".join(int(value).to_bytes(4, "big") for value in values)
 
 

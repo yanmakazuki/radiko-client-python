@@ -72,6 +72,7 @@ def cluster_width(cluster: str) -> int:
 
 
 def _is_zero(char: str) -> bool:
+    """表示幅0の文字か。結合文字・書式文字・C0/C1 制御を0幅として扱う。"""
     if unicodedata.category(char) in _ZERO_WIDTH:
         return True
     code = ord(char)
@@ -86,4 +87,5 @@ def clean_text(text: str) -> str:
 
 
 def has_control(text: str) -> bool:
+    """Cc の制御文字を含むか。表示前に clean_text で落とす対象。"""
     return _CONTROL_PATTERN.search(text) is not None
