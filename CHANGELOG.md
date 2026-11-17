@@ -2,6 +2,37 @@
 
 このプロジェクトの主な変更を記録します。形式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に従います。
 
+## [Unreleased]
+
+### 追加
+
+- 再生コアと公開データ構造の契約を日本語docstringで説明 (#85)
+- `storage` の保存形式・権限・破損時の契約をdocstringで説明 (#86)
+- `catalog` のXML解析・取得失敗の契約をdocstringで説明 (#87)
+- CLI各コマンドの引数・出力・終了コードをdocstringで説明 (#88)
+- 音声出力バックエンドのライフサイクルをdocstringで説明 (#89)
+- TUIの状態遷移とキー処理のdocstringを追加 (#91)
+- `fragmented` / `hls` / `http_client` / `prepare` の複雑な分岐に「なぜ」コメントを追加 (#92)
+- TUIの描画・入力ヘルパーのdocstringを追加 (#93)
+- 設計判断をADR 0001〜0003として記録 (#94)
+- Issue/PRテンプレートとdocstring・コメント規約を追加 (#95)
+- `auth` / `http_client` の認証・通信契約をdocstringで説明 (#108)
+- `media` / `fragmented` のAAC・fMP4契約をdocstringで説明 (#109)
+- `hls` / `stream` / `urls` の窓・検証・URL契約をdocstringで説明 (#110)
+- `prepare` とCLI入力境界のdocstringを追加 (#111)
+- `auth` / `media` / `stream` の複雑な分岐に「なぜ」コメントを追加 (#112)
+- 小モジュールのdocstringを追加 (#113)
+
+### 変更
+
+- `parity.md` のCIとモジュール境界を現行の3ジョブ構成・`dynamic_library`に合わせて更新 (#97)
+
+### 修正
+
+- 音声出力バックエンドのdocstringを実装に合わせて修正 (#90)
+- ADRのAudioQueueの戻り値記述を実装に合わせて修正 (#96)
+- `eligible` のライブ終了時のコメントを実装に合わせて修正 (#114)
+
 ## [0.1.0] - 2026-11-15
 
 ### 追加

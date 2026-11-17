@@ -19,6 +19,7 @@ Rust 版 [radiko-client](https://github.com/yanmakazuki/radiko-client) の Pytho
 - [既知の制約](#既知の制約)
 - [変更履歴](#変更履歴)
 - [アーキテクチャ](docs/architecture.md)
+- [設計判断（ADR）](docs/adr/README.md)
 - [APIリファレンス](docs/api.md)
 - [開発への参加](CONTRIBUTING.md)
 - [Rust版との対応](docs/parity.md)
