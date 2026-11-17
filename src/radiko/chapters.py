@@ -11,11 +11,15 @@ MAX_CHAPTER_BYTES = 1024 * 1024
 
 
 class ChapterError(Exception):
+    """チャプター JSON の失敗。code は large / json / array / timeline / none。"""
+
     def __init__(self, code: str) -> None:
+        """失敗コードを覚え、str(self) をメッセージにする。"""
         self.code = code
         super().__init__(str(self))
 
     def __str__(self) -> str:
+        """code に対応する日本語メッセージを返す。"""
         return {
             "large": "チャプター応答のサイズ上限を超えました",
             "json": "チャプターJSONを解析できません",
@@ -26,6 +30,9 @@ class ChapterError(Exception):
 
 
 def parse_chapters(data: bytes, slot_seconds: float, offset_seconds: float) -> ChapterSet:
+    """チャプター JSON を検証して ChapterSet にする。1MB 上限と slot/offset を検証し、
+    JSON 不正は json、chapters 配列が無ければ array。
+    """
     if len(data) > MAX_CHAPTER_BYTES:
         raise ChapterError("large")
     _check_timeline(slot_seconds, offset_seconds)
@@ -94,11 +101,13 @@ def chapters_from_json(root, slot_seconds: float, offset_seconds: float) -> Chap
 
 
 def _check_timeline(slot_seconds: float, offset_seconds: float) -> None:
+    """slot_seconds が正、offset_seconds が NaN/無限でないことを確認する。"""
     if slot_seconds <= 0 or offset_seconds != offset_seconds or abs(offset_seconds) == float("inf"):
         raise ChapterError("timeline")
 
 
 def _display(value) -> str | None:
+    """表示用に制御文字を除いて strip する。文字列でない・空なら None。"""
     if not isinstance(value, str):
         return None
     text = "".join(char for char in value if unicodedata.category(char) != "Cc").strip()
