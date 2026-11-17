@@ -105,6 +105,7 @@ class MemberClient:
             raise AuthError("input")
         response = self._login(mail, password)
         if response.status == 401:
+            # 401 は資格情報の誤り。403 は再送で直らないので http のまま扱う。
             raise AuthError("credentials")
         _success(response.status)
         try:
@@ -132,6 +133,7 @@ class MemberClient:
                 response = None
                 retry = caught.code == "network"
                 error = caught
+            # 408/5xx と通信断だけ再試行する。4xx は同じ要求を繰り返しても変わらない。
             if retry and retries < 3:
                 self.sleep(0.1 * (1 << retries))
                 retries += 1
@@ -141,6 +143,7 @@ class MemberClient:
             assert response is not None
             break
         if response.status in {400, 401}:
+            # 400/401 は保存セッションの失効。再ログインで回復するので expired にまとめる。
             raise AuthError("expired")
         _success(response.status)
         return parse_membership(response.body)
@@ -187,6 +190,7 @@ def _success(status: int) -> None:
     """200 以外を失敗にする。429 は limited、それ以外は http(status)。"""
     if status == 200:
         return
+    # 429 は一時的なアクセス制限。時間をおけば回復するので http と分ける。
     if status == 429:
         raise AuthError("limited")
     raise AuthError("http", status)
@@ -239,6 +243,7 @@ def partial_key(offset: int, length: int) -> str:
     """auth1 が示した offset/length で PLAYER_KEY を切り出し、Base64 にする。
     範囲外や長さ0以下は ProbeError("auth-format")。
     """
+    # auth1 の offset/length は PLAYER_KEY 内の部分鍵の位置。範囲外は応答不正として拒否する。
     end = offset + length
     if offset < 0 or length <= 0 or end > len(PLAYER_KEY):
         raise ProbeError("auth-format")
@@ -247,6 +252,7 @@ def partial_key(offset: int, length: int) -> str:
 
 def authenticate(fetch, session: MemberSession) -> tuple[dict[str, str], str]:
     """配信認証の唯一の実装。返したヘッダーはログに出さない。"""
+    # 20秒以内の再認証抑止は reauth.ReauthState の責務。ここは毎回 auth1 からやり直す。
     headers = {
         "x-radiko-app": "pc_html5",
         "x-radiko-app-version": "0.0.1",
@@ -255,7 +261,9 @@ def authenticate(fetch, session: MemberSession) -> tuple[dict[str, str], str]:
         "cookie": f"radiko_session={session.token}",
     }
     first = fetch("/v2/api/auth1", headers)
+    # auth1 の authtoken が無いと auth2 を作れない。欠落は _header が auth-format にする。
     token = _header(first, "x-radiko-authtoken")
+    # keyoffset/keylength はヘッダーの文字列。数値でなければ部分鍵を作れない。
     try:
         offset = int(_header(first, "x-radiko-keyoffset"))
         length = int(_header(first, "x-radiko-keylength"))
@@ -273,12 +281,14 @@ def authenticate(fetch, session: MemberSession) -> tuple[dict[str, str], str]:
         area_raw = second.body.decode().strip().split(",")[0]
     except UnicodeError as error:
         raise ProbeError("auth-format") from error
+    # auth2 の先頭は "JP13,..." 形式。JP 以外は国内配信の対象外。
     if not area_raw.startswith("JP"):
         raise ProbeError("outside-japan")
     try:
         number = int(area_raw[2:])
     except ValueError as error:
         raise ProbeError("outside-japan") from error
+    # JP1〜JP47 の範囲外は地域 ID として扱わない。
     if not 1 <= number <= 47:
         raise ProbeError("outside-japan")
     area = f"JP{number}"
