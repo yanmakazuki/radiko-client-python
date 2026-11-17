@@ -16,7 +16,10 @@ PROGRAMS_USAGE = (
 
 
 class ProgramRequest:
+    """programs の解析結果。局かエリア、放送日範囲、JSON・分類フラグ、フィルタを持つ。"""
+
     def __init__(self, station, areas, span, as_json, criteria_filter, classifications):
+        """指定された値をそのまま保持する。"""
         self.station = station
         self.areas = areas
         self.range = span
@@ -26,12 +29,16 @@ class ProgramRequest:
 
 
 def value_arg(args: list[str], index: int, usage: str) -> str:
+    """オプションの次の値を取る。値が無いか次の引数が -- なら usage エラー。"""
     if index + 1 >= len(args) or args[index + 1].startswith("--"):
         raise RuntimeError(usage)
     return args[index + 1]
 
 
 def parse_program_request(args: list[str], now: datetime) -> ProgramRequest:
+    """programs の引数を解析する。局指定か --areas/--all のどちらか、日付は最大2つ（既定は当日）、
+    範囲は最大30放送日。不明なオプションは usage エラー、日付不正は CatalogError、範囲・フィルタ不正は RuntimeError。
+    """
     genres = personalities = keyword = None
     unclassified_program = unclassified_personality = classifications = json_output = False
     areas = None
@@ -98,6 +105,7 @@ def parse_program_request(args: list[str], now: datetime) -> ProgramRequest:
 
 
 def criteria_from_request(request: ProgramRequest) -> SearchCriteria:
+    """要求を SearchCriteria にする。局は station、47エリア全部は nationwide、それ以外は areas。"""
     if request.station:
         scope = Scope.station(request.station)
     elif len(set(request.areas)) == 47:
@@ -111,4 +119,5 @@ def criteria_from_request(request: ProgramRequest) -> SearchCriteria:
 
 
 def build_criteria(args: list[str], now: datetime) -> SearchCriteria:
+    """引数を解析して検索条件にする。"""
     return criteria_from_request(parse_program_request(args, now))
