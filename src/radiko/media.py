@@ -105,13 +105,16 @@ class _Frame:
 def id3_offset(data: bytes) -> int | None:
     """連続する ID3v2 タグを飛ばした音声先頭。不正なタグは None。"""
     offset = 0
+    # ID3 タグは最大8個まで。無制限にたどると細工したタグで読み進め続けてしまう。
     for _ in range(8):
         if data[offset : offset + 3] != b"ID3":
             return offset if offset <= len(data) else None
         tag = data[offset : offset + 10]
         if len(tag) != 10 or not 2 <= tag[3] <= 4 or any(byte & 0x80 for byte in tag[6:10]):
             return None
+        # ID3v2 のサイズは 7bit×4 の synchsafe 整数。通常の uint32 として読まない。
         size = (tag[6] << 21) | (tag[7] << 14) | (tag[8] << 7) | tag[9]
+        # ID3v2.4 の footer フラグがあるときだけ、タグ本体の後ろに 10 バイト続く。
         footer = 10 if tag[3] == 4 and tag[5] & 0x10 else 0
         offset += 10 + size + footer
         if offset > len(data):
@@ -135,6 +138,7 @@ def split_adts(data: bytes, cancelled) -> list[_Frame]:
         raise AacError("cancelled")
     if len(data) > MAX_SEGMENT_BYTES:
         raise AacError("large")
+    # ID3 タグは音声ではない。先頭のタグを飛ばしてから ADTS の同期を見る。
     offset = audio_offset(data)
     if offset > len(data):
         raise AacError("metadata")
@@ -157,6 +161,7 @@ def _adts_header(view, pos: int) -> tuple[int, int, int, int, int]:
         raise AacError("header")
     channels = ((third & 1) << 2) | ((fourth >> 6) & 0x3)
     frame_length = ((fourth & 0x3) << 11) | (fifth << 3) | ((sixth >> 5) & 0x7)
+    # protection_absent=1 は CRC なしの7バイト、0 は CRC 付きの9バイト。
     header_len = 7 if second & 1 else 9
     return profile + 1, _RATES[rate_index], channels, frame_length, header_len
 
@@ -175,6 +180,7 @@ def _walk_adts(view, total: int, pos: int, cancelled, frames, strict: bool):
             raise AacError("cancelled")
         if count >= MAX_PACKETS:
             raise AacError("many")
+        # 最小の ADTS ヘッダーは 7 バイト。満たない末尾は切り詰めとして拒否する。
         if total - pos < 7:
             raise AacError("truncated")
         object_type, rate, channels, length, header_len = _adts_header(view, pos)
@@ -182,8 +188,10 @@ def _walk_adts(view, total: int, pos: int, cancelled, frames, strict: bool):
             raise AacError("header")
         if length > total - pos:
             raise AacError("truncated")
+        # CRC 付き（9バイトヘッダー）と複数 raw block は未検証。復号せず拒否する。
         if header_len != 7 or view[pos + 6] & 3 != 0:
             raise AacError("transport")
+        # この実装は AAC-LC（object_type 2）の 1〜7ch だけを復号対象にする。
         if channels == 0 or channels > 7 or object_type != 2:
             raise AacError("codec")
         current = (object_type, rate, channels)
@@ -255,6 +263,7 @@ class AdtsDecoder:
             packets, current = _walk_adts(view, len(view), offset, cancelled, None, True)
             if cancelled():
                 raise AacError("cancelled")
+            # セグメントをまたいで形式が変わると、同じデコーダーでは継続できない。
             if self.format is not None and self.format != current:
                 raise AacError("changed")
             started = time.perf_counter()
@@ -277,11 +286,13 @@ class AdtsDecoder:
                 decode_duration=time.perf_counter() - started,
                 nonzero_samples=int(np.count_nonzero(samples)),
             )
+            # SBR を検出したのに出力がコアレートのままなら、拡張を復号できていない。
             if summary.sbr_detected and summary.sample_rate <= summary.core_sample_rate:
                 raise AacError("sbr-rate")
             if declared and any(
                 part.strip() in {"mp4a.40.5", "mp4a.40.29"} for part in declared.split(",")
             ):
+                # HE-AAC 宣言を AAC-LC の成功で塗りつぶさない。
                 if not summary.sbr_detected:
                     raise AacError("sbr-missing")
             self.format = current
@@ -306,6 +317,7 @@ def _decode_adts(data: bytes | memoryview) -> tuple[np.ndarray, int, int]:
         for frame in container.decode(audio=0):
             rate = frame.sample_rate
             channels = len(frame.layout.channels)
+            # モノラルは1次元、ステレオは (channels, frames) なので転置して interleave する。
             plane = frame.to_ndarray()
             if plane.ndim == 1:
                 interleaved = plane.reshape(-1)
@@ -318,6 +330,7 @@ def _decode_adts(data: bytes | memoryview) -> tuple[np.ndarray, int, int]:
         raise AacError("decode") from error
     finally:
         container.close()
+    # フレームが1つも取れない・形式が読めない場合は成功扱いにしない。
     if not chunks or rate <= 0 or channels <= 0:
         raise AacError("empty")
     samples = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]

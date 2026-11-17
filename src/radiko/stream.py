@@ -87,6 +87,7 @@ _TEXT = {
 
 def parse_time(text: str) -> datetime:
     """YYYYMMDDHHmmss の14桁を JST の datetime にする。桁数・数字以外・日付不正は input。"""
+    # CLI の日時は日本時間の14桁。区切り付きや UTC 表記は受け付けない。
     if len(text) != 14 or not text.isascii() or not text.isdigit():
         raise ProbeError("input")
     try:
@@ -105,6 +106,7 @@ def parse_time(text: str) -> datetime:
 
 def validate_station(station: str) -> None:
     """局IDを検証する。空・32文字超・ASCII 大文字/数字/-/_ 以外は input。"""
+    # 局IDは URL と XML に入る。ASCII 大文字・数字・-/_ の32文字以内に限定する。
     if (
         not station
         or len(station) > 32
@@ -139,19 +141,25 @@ def eligible(program: SlotProgram, timefree: bool, now: datetime, membership: Me
     放送中 on-air、期限切れ expired、無料期限後の未契約 contract。
     """
     if now < program.start:
+        # 放送開始前はライブ・タイムフリーとも取得できない。
         raise ProbeError("upcoming")
     if not timefree:
+        # ライブは放送中だけ。終了後はタイムフリーの判定へ回す。
         if now < program.end:
             return
         raise ProbeError("program")
     if now < program.end:
+        # タイムフリーは放送終了後から。放送中はライブで聴く。
         raise ProbeError("on-air")
+    # 期限は番組終了ではなく放送日基準。日跨ぎ番組を翌日05:00に揃える。
     base = morning_after_end_broadcast_day(program.end)
     free_deadline = base + timedelta(days=7)
     paid_deadline = base + timedelta(days=30)
     if now >= paid_deadline:
+        # 30日を過ぎると有料会員でも取得できない。
         raise ProbeError("expired")
     if now >= free_deadline and membership.time_free_30 is not True:
+        # 7日以降はタイムフリー30が必要。未確認（None）も契約なしとして扱う。
         raise ProbeError("contract")
 
 
@@ -159,8 +167,10 @@ def area_contract(outside_area: bool, area_free: bool | None) -> ProbeError | No
     """エリア外の契約判定。域内か area_free=True なら None、契約なし False は outside、
     未確認 None は contract。
     """
+    # 域内なら契約不要。域外でも area_free=True なら聴取できる。
     if not outside_area or area_free is True:
         return None
+    # 域外で契約なしが確定している場合は、未確認と区別して outside にする。
     if area_free is False:
         return ProbeError("outside")
     return ProbeError("contract")
@@ -170,16 +180,19 @@ def availability(program: SlotProgram, now: datetime, outside: bool) -> None:
     """番組情報のタイムフリー可否を見る。failed_record が True なら unavailable、None なら unknown。
     timefree は域内/域外と7日期限の前後を添字にし、True は可、False は unavailable、None は unknown。
     """
+    # 収録失敗は配信対象外。未確認は unknown として区別する。
     if program.failed_record is True:
         raise ProbeError("unavailable")
     if program.failed_record is None:
         raise ProbeError("unknown")
     base = morning_after_end_broadcast_day(program.end)
     tsplus = base + timedelta(days=7)
+    # timefree の4値は [域内7日以内, 域内7日超, 域外7日以内, 域外7日超] の順。
     index = int(outside) * 2 + int(now >= tsplus)
     flag = program.timefree[index]
     if flag is True:
         return
+    # False は番組情報が配信対象外と明言。None は未確認なので unknown のまま。
     if flag is False:
         raise ProbeError("unavailable")
     raise ProbeError("unknown")
@@ -187,5 +200,6 @@ def availability(program: SlotProgram, now: datetime, outside: bool) -> None:
 
 def deadline_pair(end: datetime) -> tuple[str, str]:
     """無料期限（放送日の翌日05:00+7日）と有料期限（+30日）を RFC3339 で返す。"""
+    # 期限は無料7日・有料30日。放送日基準の翌日05:00から数える。
     base = morning_after_end_broadcast_day(end)
     return rfc3339(base + timedelta(days=7)), rfc3339(base + timedelta(days=30))
