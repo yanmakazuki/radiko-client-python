@@ -144,7 +144,7 @@ def eligible(program: SlotProgram, timefree: bool, now: datetime, membership: Me
         # 放送開始前はライブ・タイムフリーとも取得できない。
         raise ProbeError("upcoming")
     if not timefree:
-        # ライブは放送中だけ。終了後はタイムフリーの判定へ回す。
+        # 終了後はライブとして拒否し、タイムフリーは別の呼び出しで判定する。
         if now < program.end:
             return
         raise ProbeError("program")
