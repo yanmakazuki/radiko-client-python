@@ -359,7 +359,7 @@ def parse_media_playlist(text: str) -> MediaPlaylist:
 
 
 def parse_master_codec(text: str) -> str | None:
-    """マスタープレイリストの最初の STREAM-INF から CODECS を返す。宣言が無ければ None。"""
+    """マスタープレイリストの CODECS を持つ最初の STREAM-INF から CODECS を返す。宣言が無ければ None。"""
     for line in text.splitlines():
         if line.startswith("#EXT-X-STREAM-INF:") and "CODECS=" in line:
             raw = parse_attribute(line, "CODECS")
