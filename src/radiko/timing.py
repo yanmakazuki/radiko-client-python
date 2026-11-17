@@ -70,6 +70,7 @@ def trim_pcm(
 
 
 def _microseconds(value: float) -> int:
+    """秒をマイクロ秒の整数に丸める。2ms 許容の比較を整数で行うため。"""
     return int(round(value * 1_000_000))
 
 
@@ -77,6 +78,7 @@ class ReconnectBudget:
     """再生が一度始まったあとの通信失敗だけを、1 秒から倍々で最大 5 分待つ。"""
 
     def __init__(self, cancelled, sleep=None):
+        """待ち時間と backoff を初期化する。backoff は1秒から。"""
         self.cancelled = cancelled
         self.sleep = sleep or __import__("time").sleep
         self.waited = 0.0
@@ -84,6 +86,7 @@ class ReconnectBudget:
         self.steps: list[float] = []
 
     def can_retry(self, error: ProbeError, played: bool) -> bool:
+        """再生開始後だけ、network と 408/5xx を再試行対象にする。at は1段はがす。"""
         if not played:
             return False
         current = error.inner if error.code == "at" and error.inner is not None else error
@@ -92,6 +95,7 @@ class ReconnectBudget:
         return current.code == "http" and (current.status == 408 or (current.status or 0) >= 500)
 
     def wait(self) -> None:
+        """backoff を1秒から倍々で待ち、累計5分またはキャンセルで打ち切る。"""
         if self.cancelled():
             raise ProbeError("cancelled")
         if self.waited >= RECONNECT_LIMIT or self.backoff == 0:

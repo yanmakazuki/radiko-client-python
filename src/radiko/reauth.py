@@ -15,7 +15,10 @@ REAUTH_INTERVAL = 20.0
 
 
 class ReauthState:
+    """再生中の401をエピソードごとに1回だけ再認証する状態。20秒以内はトークンを再利用し、403/429は対象外。"""
+
     def __init__(self, session: MemberSession, cancelled, refresh, now=None):
+        """保存セッション・取り消し判定・refresh 関数・時計を保持する。last は最後の再認証を始めた時刻。"""
         self.session = session
         self.cancelled = cancelled
         self.refresh = refresh
@@ -25,6 +28,9 @@ class ReauthState:
         self.episode = False
 
     def renew(self, headers: dict[str, str], stage: str) -> tuple[dict[str, str], str]:
+        """headers を更新する。直近20秒または同じ401の連続なら既存の authtoken を再利用し、
+        無ければ refresh を1回呼ぶ。
+        """
         recent = self.last is not None and self.now() - self.last < REAUTH_INTERVAL
         if self.episode or recent:
             if "x-radiko-authtoken" in headers:
