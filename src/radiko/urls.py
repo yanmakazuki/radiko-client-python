@@ -16,6 +16,9 @@ _SUFFIXES = ("radiko.jp", "radiko-cf.com", "smartstream.ne.jp")
 
 
 def trusted(url: str) -> bool:
+    """配信先として信頼する URL か。https・ポート443/省略・ユーザー情報なしで、
+    radiko.jp / radiko-cf.com / smartstream.ne.jp とそのサブドメインだけ True。
+    """
     parts = urlsplit(url)
     host = parts.hostname or ""
     if parts.username or parts.password:
@@ -28,6 +31,9 @@ def trusted(url: str) -> bool:
 
 
 def loopback_origin() -> str | None:
+    """RADIKO_LOOPBACK_ORIGIN を検証して origin を返す。http://127.0.0.1:ポート で
+    パスが空か /、クエリ・フラグメント・ユーザー名なしのときだけ許し、未設定は None、それ以外は unsafe。
+    """
     value = os.environ.get("RADIKO_LOOPBACK_ORIGIN")
     if not value:
         return None
@@ -60,6 +66,7 @@ def transport_url(url: str) -> str:
 
 
 def append_query(url: str, pairs: list[tuple[str, str]]) -> str:
+    """既存クエリを保ったまま pairs を追加する。フラグメントは落とす。"""
     parts = urlsplit(url)
     query = parse_qsl(parts.query, keep_blank_values=True)
     query.extend(pairs)
