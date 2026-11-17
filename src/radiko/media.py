@@ -357,7 +357,7 @@ def _word(data, offset: int) -> int:
 
 
 def _walk(data, depth: int, boxes: int, samples: int) -> tuple[int, int]:
-    """箱を再帰的に走査し、(箱数, sample 数) を返す。深さ16は container、箱8192・sample 4096 は many。
+    """箱を再帰的に走査し、(箱数, sample 数) を返す。深さ17以上は container、箱8192超・sample 4096超は many。
     trun/stsz/stz2 と stts の展開数も数え、サイズや入れ子の不整合は container。
     """
     if depth > 16:
