@@ -231,6 +231,8 @@ def no_color_enabled(value: str | None) -> bool:
 
 
 class NoticeLevel:
+    """通知の重要度。INFO < WARNING < ERROR で、rank が数値化する。"""
+
     INFO = "info"
     WARNING = "warning"
     ERROR = "error"
@@ -243,6 +245,8 @@ class NoticeLevel:
 
 @dataclass
 class Notice:
+    """フッターに出す通知1件。level・text・sticky（キーで消えるまで残す）・created。"""
+
     level: str
     text: str
     sticky: bool = False
@@ -251,6 +255,8 @@ class Notice:
 
 @dataclass
 class LineEditor:
+    """1行入力の編集状態。value・UTF-8 バイトの cursor・byte_limit・scalar_limit を持つ。"""
+
     value: str = ""
     cursor: int = 0
     byte_limit: int = 1024
@@ -480,6 +486,10 @@ def split_args(args: list[str]) -> tuple[bool, list[str]]:
 
 @dataclass
 class Screen:
+    """TUI の全状態。番組一覧・再生・認証・通知・フィルタ・ジョブ世代をまとめ、
+    描画とキー処理はメソッドが担う。
+    """
+
     programs: list[Program]
     now: datetime
     width: int = 80
@@ -1195,6 +1205,9 @@ class Screen:
         probe = self.device_probe
 
         def work() -> None:
+            """別スレッドで出力機器を診断し、世代付きの結果を device_box へ入れる。
+            OutputError は案内文にする。
+            """
             try:
                 report = (probe or diagnose_default_output)(48000)
                 box.put((generation, report, ""))
