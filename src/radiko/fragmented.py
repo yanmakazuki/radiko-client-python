@@ -18,6 +18,10 @@ _WORD = struct.Struct(">I")
 
 
 class FragmentPcm:
+    """fMP4 1フラグメントの復号結果。decode_time・duration はトラックの timescale 単位で、
+    PCM は float32 のインターリーブ配列。
+    """
+
     def __init__(
         self,
         decode_time: int,
@@ -28,6 +32,7 @@ class FragmentPcm:
         channels: int,
         packets: int = 0,
     ):
+        """各値を保持し、frames を channels から計算する。"""
         self.decode_time = decode_time
         self.timescale = timescale
         self.duration = duration
@@ -38,11 +43,15 @@ class FragmentPcm:
         self.frames = len(samples) // max(channels, 1)
 
     def __repr__(self) -> str:
+        """時刻とフレーム数だけを出し、PCM は REDACTED にする。"""
         return f"FragmentPcm(time={self.decode_time}, frames={self.frames}, samples=[REDACTED])"
 
 
 class _Atom:
+    """MP4 の箱1つ。`data` はヘッダーを除いた memoryview、`offset` は元データ内の開始位置。"""
+
     def __init__(self, kind: bytes, data, offset: int, header: int):
+        """種別・本体・開始位置・ヘッダー長を保持する。"""
         self.kind = kind
         self.data = data
         self.offset = offset
@@ -50,6 +59,9 @@ class _Atom:
 
 
 def _atoms(data) -> list[_Atom]:
+    """箱を並び順に解析する。size 0 は末尾まで、size 1 は64bit 長、上限は8192箱。
+    本体は元データの memoryview で切り、コピーしない。
+    """
     view = memoryview(data)
     total = len(view)
     result: list[_Atom] = []
@@ -76,6 +88,7 @@ def _atoms(data) -> list[_Atom]:
 
 
 def _one(items: list[_Atom], kind: bytes) -> _Atom:
+    """指定種別の箱がちょうど1つなら返す。無ければ container、複数なら unsupported-container。"""
     found = [item for item in items if item.kind == kind]
     if len(found) != 1:
         raise AacError("container" if not found else "unsupported-container")
@@ -83,6 +96,7 @@ def _one(items: list[_Atom], kind: bytes) -> _Atom:
 
 
 def _word(data, at: int) -> int:
+    """オフセットの big-endian uint32 を返す。4バイト未満なら AacError("container")。"""
     try:
         return _WORD.unpack_from(data, at)[0]
     except struct.error as error:
@@ -90,6 +104,7 @@ def _word(data, at: int) -> int:
 
 
 def _take(data, at: int) -> tuple[int, int]:
+    """uint32 を読み、(値, 次のオフセット) を返す。"""
     return _word(data, at), at + 4
 
 
@@ -190,6 +205,9 @@ def _parse_trun(
 
 
 def _asc_config(asc) -> tuple[int, int]:
+    """AudioSpecificConfig の先頭2バイトを読み、(sample_rate, channels) を返す。
+    AAC-LC（object_type 2）・既知の rate index・1〜7ch 以外は config。
+    """
     if len(asc) < 2:
         raise AacError("config")
     bits = int.from_bytes(asc[:2], "big")
@@ -202,11 +220,15 @@ def _asc_config(asc) -> tuple[int, int]:
 
 
 def _decoder_specific(esds) -> bytes | memoryview:
+    """esds から DecoderSpecificInfo（tag 0x05）を探して返す。0x03/0x04 は入れ子をたどり、
+    長さ表現や途中で切れた記述は config。
+    """
     if len(esds) < 4:
         raise AacError("config")
     body = esds[4:]
 
     def walk(blob) -> bytes | memoryview | None:
+        """ES 記述子を順に読み、tag 0x05 の本体を返す。見つからなければ None。"""
         index = 0
         while index < len(blob):
             tag = blob[index]
@@ -240,7 +262,14 @@ def _decoder_specific(esds) -> bytes | memoryview:
 
 
 class FragmentedAacDecoder:
+    """単一 AAC トラックの fragmented MP4 デコーダ。init で moov を検証し、
+    decode_pcm で moof+mdat の連続性と PCM 長を確認する。
+    """
+
     def __init__(self, init: bytes):
+        """init セグメントを検証してトラック情報を保持する。1MB 上限、ftyp+moov の順、
+        単一 trak/mp4a/esds、空の sample 表、mvex/trex の既定値を確認する。
+        """
         if len(init) > 1024 * 1024:
             raise AacError("large")
 
@@ -310,6 +339,9 @@ class FragmentedAacDecoder:
         self.next_sequence: int | None = None
 
     def decode_pcm(self, data: bytes, cancelled=None, declared: str | None = None) -> FragmentPcm:
+        """1フラグメントを復号して FragmentPcm を返す。失敗したらデコーダーと
+        次に期待する時刻・連番を捨て、次のセグメントからやり直せるようにする。
+        """
         cancelled = cancelled or (lambda: False)
         try:
             result = self._decode(data, cancelled, declared)
@@ -321,6 +353,9 @@ class FragmentedAacDecoder:
         return result
 
     def _read(self, data: bytes, cancelled) -> dict:
+        """moof+mdat（先頭 styp 可）を解析し、packets と次回の時刻・連番を返す。
+        mfhd の連番、tfdt の連続、traf の3箱、mdat 先頭の data_offset を検証する。
+        """
         if cancelled():
             raise AacError("cancelled")
         if len(data) > MAX_SEGMENT_BYTES:
@@ -375,6 +410,9 @@ class FragmentedAacDecoder:
         }
 
     def _decode(self, data: bytes, cancelled, declared: str | None) -> FragmentPcm:
+        """packets を PyAV で復号し、duration と PCM 長の一致、4MB 上限、宣言された
+        HE-AAC の SBR を確認して FragmentPcm を返す。成功時だけ次回の時刻・連番を進める。
+        """
         media = self._read(data, cancelled)
         codec = self._codec
         if codec is None:
