@@ -28,8 +28,8 @@ class ReauthState:
         self.episode = False
 
     def renew(self, headers: dict[str, str], stage: str) -> tuple[dict[str, str], str]:
-        """headers を更新する。直近20秒または同じ401の連続なら既存の authtoken を再利用し、
-        無ければ refresh を1回呼ぶ。
+        """headers を更新する。直近20秒または同一エピソード中は既存 authtoken を使い、
+        無ければ auth-expired。それ以外は refresh を1回呼ぶ。
         """
         recent = self.last is not None and self.now() - self.last < REAUTH_INTERVAL
         if self.episode or recent:

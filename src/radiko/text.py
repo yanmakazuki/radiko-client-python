@@ -72,7 +72,7 @@ def cluster_width(cluster: str) -> int:
 
 
 def _is_zero(char: str) -> bool:
-    """表示幅0の文字か。結合文字・書式文字・C0/C1 制御を0幅として扱う。"""
+    """表示幅0の文字か。結合文字・書式文字・C0 と DEL（U+007F）を0幅として扱う。"""
     if unicodedata.category(char) in _ZERO_WIDTH:
         return True
     code = ord(char)
