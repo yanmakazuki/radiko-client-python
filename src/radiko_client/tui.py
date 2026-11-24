@@ -67,7 +67,6 @@ USAGE = (
 COMPACT_HEIGHT = 29
 HINT_ITEMS = ["? 操作一覧", "Enter 再生", "Space 一時停止", "q 終了"]
 NOTICE_HOLD = 5
-DIALOG_AREAS = {"help", "device", "failures", "named", "chapters", "logout"}
 AREA_CHOICES = ["全国", *[f"JP{number}" for number in range(1, 48)]]
 
 
@@ -363,26 +362,6 @@ def _boundaries(value: str) -> list[int]:
 def _snap_points(points: list[int], cursor: int) -> int:
     """カーソルに最も近い境界を返す。同距離なら小さい方（前）を選ぶ。"""
     return min(points, key=lambda point: (abs(point - cursor), point))
-
-
-def _snap(value: str, cursor: int) -> int:
-    """値の書記素境界のうち、cursor に最も近いバイト位置を返す。"""
-    points = _boundaries(value)
-    return _snap_points(points, cursor)
-
-
-def _previous(value: str, cursor: int) -> int:
-    """cursor より前の直近の書記素境界を返す。無ければ0。"""
-    points = [point for point in _boundaries(value) if point < cursor]
-    return points[-1] if points else 0
-
-
-def _next(value: str, cursor: int) -> int:
-    """cursor より後ろの直近の書記素境界を返す。無ければ末尾のバイト位置。"""
-    for point in _boundaries(value):
-        if point > cursor:
-            return point
-    return len(value.encode())
 
 
 def hint(width: int) -> str:

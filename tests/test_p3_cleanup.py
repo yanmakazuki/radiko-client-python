@@ -144,17 +144,28 @@ def test_every_module_imports_alone_without_a_cycle():
 def test_dead_helpers_and_single_element_imports_are_gone():
     import importlib.util
 
-    from radiko import fragmented, media
+    from radiko import fragmented, http_client, media
+    from radiko_client import io, tui
 
     assert importlib.util.find_spec("radiko.player") is None
     assert not hasattr(fragmented, "synthetic_init")
     assert not hasattr(fragmented, "synthetic_fragment")
     assert not hasattr(media, "encode_adts_sine")
+    assert not hasattr(http_client, "_StaleConnection")
     assert not hasattr(prepare, "_unused_split")
+    assert not hasattr(prepare, "_rfc3339_secs")
+    assert not hasattr(prepare, "_segment_discontinuity")
     assert not hasattr(prepare, "timedelta_utc")
     assert not hasattr(storage, "unicat")
+    assert not hasattr(tui, "DIALOG_AREAS")
+    assert not hasattr(tui, "_snap")
+    assert not hasattr(tui, "_previous")
+    assert not hasattr(tui, "_next")
+    assert not hasattr(io, "stderr_write")
     with pytest.raises(storage.SearchError):
         storage._check_name("a\x01b")
     source = Path(prepare.__file__).read_text()
     assert "if False else" not in source
     assert "urlsplit" not in source
+    for path in sorted(Path("src").rglob("*.py")):
+        assert "__import__" not in path.read_text(), path
