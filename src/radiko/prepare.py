@@ -111,11 +111,8 @@ class ProbeReport:
 class PlayReport:
     """再生ループの結果。
 
-    `reason` は `limit`（指定秒で停止）/ `cancelled`（停止・キャンセル）/
-    `program-end`（番組終端）。`frames` は出力フレーム数、`segments` は再生した
-    セグメント数、`underrun_frames` はアンダーラン、`sample_rate` / `channels` は
-    最後に使った出力、`messages` は操作中の通知。`title` / `station` / `mode` /
-    `starts_at` / `ends_at` は番組のメタデータ。
+    `reason` は `limit` / `cancelled` / `program-end`。出力フレーム・セグメント・
+    アンダーラン・サンプルレート/ch・番組メタデータと操作通知 `messages` を保持する。
     """
 
     reason: str
@@ -144,9 +141,8 @@ class ChapterFailure(Exception):
 class ChapterView:
     """チャプター取得の表示用ビュー。
 
-    `kind` は `aligned`（番組と対応済み）/ `unresolved`（対応付け未確認）/
-    `unavailable`（提供なし）。`rows` は (開始秒, 終了秒, 見出し)、`count` /
-    `music` / `invalid` は件数の内訳。
+    `kind` は `aligned` / `unresolved` / `unavailable`。
+    `rows` は `(開始秒, 終了秒, 見出し)`、`count` / `music` / `invalid` は件数の内訳。
     """
 
     station: str
@@ -185,9 +181,8 @@ def fetch_program(station: str, cursor: datetime, cancelled) -> ResolvedProgram:
 def parse_program(data: bytes, station: str, cursor: datetime) -> ResolvedProgram:
     """番組 JSON を検証して ResolvedProgram にする。
 
-    1件だけ・cursor が放送枠内・stationId が一致または欠落、を要求する。blackout の
-    tsInNg / tsplusInNg / tsOutNg / tsplusOutNg は 0 を可、2 を不可、他は未確認。不正は
-    `ProbeError("program")`、該当なしは `ProbeError("not-found")`。
+    1件だけ・cursor が放送枠内・stationId 一致（または欠落）を要求し、blackout の 0=可 / 2=不可を解釈する。
+    不正は `ProbeError("program")`、該当なしは `ProbeError("not-found")`。
     """
     try:
         root = json.loads(data.decode())
@@ -309,10 +304,8 @@ def prepare(
 ):
     """再生に必要な番組・認証・エリア・配信先 URL を解決する。
 
-    戻り値は (program, 認証ヘッダ, エリア, エリア外か, プレイリスト URL の候補)。
-    各取得の失敗は `ProbeError` に stage（放送枠取得 / 配信認証 / 地域の局一覧取得 /
-    配信先設定の取得）を付けて送出する。position を検証し、mode は timefree 以外を
-    live として扱う。
+    `(program, 認証ヘッダ, エリア, エリア外か, URL候補)` を返す。
+    失敗は段階名付きの `ProbeError`、不正な `position` は `ProbeError("position")`。
     """
     cancelled = cancelled or (lambda: False)
     try:
@@ -679,8 +672,7 @@ def container_name(data: bytes) -> str:
     """ID3 を除いた先頭バイトからコンテナ名を判定する。
 
     ISO BMFF / fragmented MP4、ADTS（MPEG-2 / MPEG-4 / MPEG-4 CRC）、MPEG-TS、
-    ID3 + unknown payload、unknown を返す。ID3 ヘッダが不正なら "invalid ID3"。
-    判定できなくても例外は出さない。
+    ID3 + unknown payload、unknown、不正 ID3 は `"invalid ID3"` を返す（例外なし）。
     """
     offset = id3_offset(data)
     if offset is None:
@@ -897,10 +889,8 @@ def _get_or_recover(
 ):
     """セグメントを取得し、401 なら再認証して同じ位置を再取得する。
 
-    `state.renew` でヘッダを更新し、プレイリストを取り直してから init
-    （kind="init" なら map_uri）またはメディアの対象を再要求する。再認証後も
-    401 なら `ProbeError("auth-expired")`、位置が窓外なら `ProbeError("window")`。
-    戻り値は (body, headers, media, playlist_url, sequence, 再取得したか)。
+    `state.renew` と一覧更新後に `init` またはメディアを再要求し、再 401 は `auth-expired`、
+    窓外は `window`。戻り値は `(body, headers, media, playlist_url, sequence, reset)`。
     """
     try:
         reply = stream_get(
@@ -1412,9 +1402,8 @@ def _fetch_segment(
 class _DecodedSegment:
     """1セグメントの復号結果。
 
-    `media_seconds` はトリム後・limit 切り詰め後の経過秒。`limit_hit` は limit で
-    打ち切る必要があることを示す。`stop` は残りが 0 秒で、出力せずに打ち切ることを示す。
-    `discard` はトリムでセグメント全体を捨てることを示す（復号後の状態は保持する）。
+    `media_seconds` はトリム・limit 切り詰め後の経過秒、`limit_hit` は limit 到達。
+    `stop` は残り0秒で出力せず終了、`discard` はトリムでセグメント全体を捨てる。
     """
 
     samples: np.ndarray
@@ -1555,9 +1544,8 @@ def _open_media(url: str, headers: dict[str, str], cancelled):
 def inspect_remote_chapters(station: str, cursor: datetime, cancelled=None) -> ChapterView:
     """番組のチャプターを取得して ChapterView を返す。
 
-    取り消しは `ChapterFailure`。番組取得の失敗も `ChapterFailure` に包む。
-    eventId と番組開始位置が揃わない場合は kind="unresolved" で理由を返し、
-    提供がない場合は kind="unavailable" にする。
+    取り消し・取得失敗・不正応答は `ChapterFailure`。
+    eventId や開始位置が揃わなければ `kind="unresolved"`、提供なしは `kind="unavailable"`。
     """
     cancelled = cancelled or (lambda: False)
     if cancelled():

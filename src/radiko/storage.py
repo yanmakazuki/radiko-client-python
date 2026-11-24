@@ -559,9 +559,8 @@ def _decode_session(data: bytes) -> MemberSession:
 def _decode_library(data: bytes) -> Library:
     """searches.json の bytes を Library にする。
 
-    version 1、last、named だけを許す。名前は `_check_name`、条件は
-    `criteria_from_file` で検証する。形式・値の不正は SearchError("storage")。
-    サイズの検査は `SearchStore.load` と `_write` が行う。
+    version 1・last・named だけを許し、名前は `_check_name`、条件は `criteria_from_file` で検証する。
+    形式・値の不正は `SearchError("storage")`（サイズ検査は `load` / `_write` 側）。
     """
     try:
         value = json.loads(data.decode())
