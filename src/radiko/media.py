@@ -216,21 +216,10 @@ def _parse_adts(data) -> dict:
     """ADTS ヘッダーを1つ読む。同期・layer・rate index を検証し、CRC の有無で
     header_len を 7/9 にした辞書を返す。フレーム長や後続の整合は見ない。
     """
-    if data[0] != 0xFF or data[1] & 0xF0 != 0xF0:
-        raise AacError("header")
-    if (data[1] >> 1) & 0x3 != 0:
-        raise AacError("header")
-    protection_absent = data[1] & 1
-    profile = (data[2] >> 6) & 0x3
-    rate_index = (data[2] >> 2) & 0xF
-    if rate_index >= len(_RATES):
-        raise AacError("header")
-    channels = ((data[2] & 1) << 2) | ((data[3] >> 6) & 0x3)
-    frame_length = ((data[3] & 0x3) << 11) | (data[4] << 3) | ((data[5] >> 5) & 0x7)
-    header_len = 7 if protection_absent else 9
+    object_type, sample_rate, channels, frame_length, header_len = _adts_header(data, 0)
     return {
-        "object_type": profile + 1,
-        "sample_rate": _RATES[rate_index],
+        "object_type": object_type,
+        "sample_rate": sample_rate,
         "channels": channels,
         "frame_length": frame_length,
         "header_len": header_len,
@@ -369,6 +358,24 @@ def _word(data, offset: int) -> int:
         raise AacError("container") from error
 
 
+def _box_header(view: memoryview, pos: int, total: int) -> tuple[bytes, int, int]:
+    """MP4 ボックスヘッダーを読み、(kind, size, header) を返す。size 0 は末尾まで、size 1 は64bit 長。"""
+    size = _word(view, pos)
+    kind = bytes(view[pos + 4 : pos + 8])
+    if len(kind) != 4:
+        raise AacError("container")
+    if size == 0:
+        size, header = total - pos, 8
+    elif size == 1:
+        size = (_word(view, pos + 8) << 32) | _word(view, pos + 12)
+        header = 16
+    else:
+        header = 8
+    if size < header or size > total - pos:
+        raise AacError("container")
+    return kind, size, header
+
+
 def _walk(data, depth: int, boxes: int, samples: int) -> tuple[int, int]:
     """箱を再帰的に走査し、(箱数, sample 数) を返す。深さ17以上は container、箱8192超・sample 4096超は many。
     trun/stsz/stz2 と stts の展開数も数え、サイズや入れ子の不整合は container。
@@ -382,22 +389,7 @@ def _walk(data, depth: int, boxes: int, samples: int) -> tuple[int, int]:
         boxes += 1
         if boxes > MAX_BOXES:
             raise AacError("many")
-        size = _word(view, pos)
-        kind = bytes(view[pos + 4 : pos + 8])
-        if len(kind) != 4:
-            raise AacError("container")
-        if size == 0:
-            size = total - pos
-            header = 8
-        elif size == 1:
-            if total - pos < 16:
-                raise AacError("container")
-            size = int.from_bytes(view[pos + 8 : pos + 16], "big")
-            header = 16
-        else:
-            header = 8
-        if size < header or size > total - pos:
-            raise AacError("container")
+        kind, size, header = _box_header(view, pos, total)
         payload = pos + header
         if kind in {
             b"moov",
