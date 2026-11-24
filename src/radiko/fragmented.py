@@ -6,15 +6,18 @@ Rust の `FragmentedAacDecoder` と同じ条件で拒否する。
 
 from __future__ import annotations
 
-import struct
-
 import av
 import numpy as np
 
-from radiko.media import MAX_PCM_BYTES, MAX_SEGMENT_BYTES, AacError, validate_mp4
-
-_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
-_WORD = struct.Struct(">I")
+from radiko.media import (
+    _RATES,
+    MAX_PCM_BYTES,
+    MAX_SEGMENT_BYTES,
+    AacError,
+    _box_header,
+    _word,
+    validate_mp4,
+)
 
 
 class FragmentPcm:
@@ -69,19 +72,7 @@ def _atoms(data) -> list[_Atom]:
     while at < total:
         if len(result) == 8192:
             raise AacError("many")
-        size = _word(view, at)
-        kind = bytes(view[at + 4 : at + 8])
-        if len(kind) != 4:
-            raise AacError("container")
-        if size == 0:
-            size, header = total - at, 8
-        elif size == 1:
-            size = (_word(view, at + 8) << 32) | _word(view, at + 12)
-            header = 16
-        else:
-            header = 8
-        if size < header or size > total - at:
-            raise AacError("container")
+        kind, size, header = _box_header(view, at, total)
         result.append(_Atom(kind, view[at + header : at + size], at, header))
         at += size
     return result
@@ -93,14 +84,6 @@ def _one(items: list[_Atom], kind: bytes) -> _Atom:
     if len(found) != 1:
         raise AacError("container" if not found else "unsupported-container")
     return found[0]
-
-
-def _word(data, at: int) -> int:
-    """オフセットの big-endian uint32 を返す。4バイト未満なら AacError("container")。"""
-    try:
-        return _WORD.unpack_from(data, at)[0]
-    except struct.error as error:
-        raise AacError("container") from error
 
 
 def _take(data, at: int) -> tuple[int, int]:
