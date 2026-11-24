@@ -20,6 +20,8 @@ from radiko.domain import (
     Program,
     ProgramKey,
     Station,
+    is_valid_station_id,
+    parse_ymd,
 )
 from radiko.stream import ProbeError
 from radiko.text import clean_text
@@ -97,23 +99,14 @@ def validate_station(station: str) -> None:
     """局IDが空でなく32文字以内の ASCII 大文字・数字・-・_ だけか。
     違反は CatalogError("station")。
     """
-    if (
-        not station
-        or len(station) > 32
-        or not all(
-            char.isascii() and (char.isupper() or char.isdigit() or char in "-_")
-            for char in station
-        )
-    ):
+    if not is_valid_station_id(station):
         raise CatalogError("station")
 
 
 def parse_day(text: str) -> date:
     """`YYYYMMDD` を JST の日付にする。8桁でない・実在しない日付は CatalogError("date")。"""
-    if len(text) != 8 or not text.isdigit():
-        raise CatalogError("date")
     try:
-        return date(int(text[0:4]), int(text[4:6]), int(text[6:8]))
+        return parse_ymd(text)
     except ValueError as error:
         raise CatalogError("date") from error
 

@@ -452,8 +452,8 @@ class Scope:
         return {"kind": self.kind, "value": self.value}
 
 
-def _valid_station(station_id: str) -> bool:
-    """保存できる局IDか。ASCII の大文字・数字・-・_ のみ、32文字以内。"""
+def is_valid_station_id(station_id: str) -> bool:
+    """有効な局IDか。ASCII の大文字・数字・-・_ のみ、1〜32文字。"""
     if not station_id or len(station_id) > 32:
         return False
     return all(
@@ -481,7 +481,7 @@ class SearchCriteria:
         局IDや地域IDが不正なら ValueError。エリアは重複を除いてソートする。
         """
         if scope.kind == ScopeKind.STATION:
-            if not isinstance(scope.value, str) or not _valid_station(scope.value):
+            if not isinstance(scope.value, str) or not is_valid_station_id(scope.value):
                 raise ValueError("保存する局IDが不正です")
         elif scope.kind == ScopeKind.AREAS:
             areas = list(scope.value or [])
@@ -548,8 +548,8 @@ def criteria_from_file(value: dict) -> SearchCriteria:
         scope = Scope.areas(list(scope_value["value"]))
     else:
         raise ValueError("invalid")
-    start = _ymd(value["start"])
-    end = _ymd(value["end"])
+    start = parse_ymd(value["start"])
+    end = parse_ymd(value["end"])
     try:
         span = BroadcastRange.new(start, end)
     except ValueError as error:
@@ -560,9 +560,9 @@ def criteria_from_file(value: dict) -> SearchCriteria:
         raise ValueError("invalid") from error
 
 
-def _ymd(text: str) -> date:
-    """YYYYMMDD を date にする。形式・実在しない日付は ValueError。"""
-    if len(text) != 8 or not text.isdigit():
+def parse_ymd(text: str) -> date:
+    """YYYYMMDD の8桁 ASCII 数字を date にする。形式・実在しない日付は ValueError("invalid")。"""
+    if len(text) != 8 or not text.isascii() or not text.isdigit():
         raise ValueError("invalid")
     try:
         return date(int(text[0:4]), int(text[4:6]), int(text[6:8]))
