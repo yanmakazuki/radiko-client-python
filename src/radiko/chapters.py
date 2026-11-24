@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import unicodedata
 
 from radiko.domain import Chapter, ChapterSet
+from radiko.text import strip_control
 
 MAX_CHAPTER_BYTES = 1024 * 1024
 
@@ -110,5 +110,5 @@ def _display(value) -> str | None:
     """表示用に制御文字を除いて strip する。文字列でない・空なら None。"""
     if not isinstance(value, str):
         return None
-    text = "".join(char for char in value if unicodedata.category(char) != "Cc").strip()
+    text = strip_control(value).strip()
     return text or None

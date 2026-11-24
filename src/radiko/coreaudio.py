@@ -10,12 +10,12 @@ import ctypes
 import sys
 import threading
 import time
-import unicodedata
 
 import numpy as np
 
 from radiko.audio import OutputError, OutputInfo, OutputSummary
 from radiko.dynamic_library import find_library, open_library
+from radiko.text import strip_control
 
 LINEAR_PCM = 0x6C70636D
 FLOAT_PACKED = 1 | 8
@@ -119,7 +119,7 @@ AUDIO_QUEUE_IS_RUNNING = _fourcc("aqrn")
 
 def sanitize_device_name(text: str) -> str:
     """Rust 同様、制御文字を落とし256文字で切る。"""
-    return "".join(char for char in text if unicodedata.category(char) != "Cc")[:NAME_LIMIT]
+    return strip_control(text)[:NAME_LIMIT]
 
 
 def inspect(rate: int, opened=None) -> OutputInfo:

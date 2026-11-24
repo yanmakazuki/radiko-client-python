@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from radiko.domain import JST, broadcast_day, rfc3339
+from radiko.domain import JST, broadcast_day, is_valid_station_id, rfc3339
 from radiko.storage import Membership
 
 
@@ -118,14 +118,7 @@ def parse_time(text: str) -> datetime:
 def validate_station(station: str) -> None:
     """局IDを検証する。空・32文字超・ASCII 大文字/数字/-/_ 以外は input。"""
     # 局IDは URL と XML に入る。ASCII 大文字・数字・-/_ の32文字以内に限定する。
-    if (
-        not station
-        or len(station) > 32
-        or not all(
-            char.isascii() and (char.isupper() or char.isdigit() or char in "-_")
-            for char in station
-        )
-    ):
+    if not is_valid_station_id(station):
         raise ProbeError("input")
 
 
