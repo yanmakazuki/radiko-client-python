@@ -147,12 +147,8 @@ class ProgramList:
 def parse_programs(data: bytes, station: str, day: date) -> ProgramList:
     """番組表 XML を検証し、`<prog>` を Program にして放送日順で返す。
 
-    処理順: 局ID検証 → 4MB・XML構造（radiko/stations/station/progs）→ 2048枠上限 →
-    JST 05:00 から翌日 05:00 の窓 → 各 `<prog>` の ft/to（不正は invalid_count）→
-    (局, 開始) の重複（duplicate_count）→ title/pfm/desc/info は最初の要素だけ →
-    tag は重複除去 → genre を番組/出演者に分類 → 開始時刻でソート。
-    有効な枠が無く不正だけなら CatalogError("empty", count=invalid_count)。
-    局不一致は wrong-station、構造不正は xml、上限超過は large。
+    4MB・2048枠・JST 05:00 窓を検査し、不正枠は `invalid_count`、重複は `duplicate_count` に数える。
+    失敗は `CatalogError("station" / "large" / "xml" / "wrong-station" / "empty")`。
     """
     validate_station(station)
     if len(data) > MAX_SCHEDULE_BYTES:
@@ -277,10 +273,8 @@ def parse_stations(data: bytes, area: str) -> list[Station]:
 def parse_endpoints(data: bytes, timefree: bool, outside: bool) -> list[str]:
     """配信先 XML から、モードと地域に合う `playlist_create_url` を返す。
 
-    `areafree` と `timefree` が指定に一致する `<url>` だけを対象にし、URL は
-    `trusted()` を通す（通らなければ ProbeError("unsafe")）。空の
-    `playlist_create_url` の `<url>` は読み飛ばし、1件も残らなければ ValueError。
-    重複は除く。XML 不正も ValueError。
+    `areafree` / `timefree` 一致と `trusted()` を検証して重複を除く。
+    非信頼 URL は `ProbeError("unsafe")`、空や XML 不正は `ValueError`。
     """
     try:
         root = ET.fromstring(data.decode())
@@ -540,10 +534,8 @@ def acquire_range(
 ) -> Report:
     """地域の並びから局一覧を並列取得し、続けて全員分の番組表を取得する。
 
-    地域IDは重複を除いてソートし、空なら CatalogError("area")。局一覧は最大4並列で、
-    CatalogError は area_failures に積んで続行、それ以外の例外は送出する。同じ局が
-    複数地域にある場合は areas にまとめる。番組表は `_schedules` が担当。
-    各段階の前後と `_schedules` 内で cancelled を確認し、取り消しは CatalogError("cancelled")。
+    最大4並列で進捗を通知し、`CatalogError` は `area_failures` / `schedule_failures` に記録する。
+    空地域・不正地域は `CatalogError("area")`、取り消しは `CatalogError("cancelled")`。
     """
     if cancelled.is_set():
         raise CatalogError("cancelled")
@@ -618,9 +610,8 @@ def _schedules(
 ) -> None:
     """局×放送日の番組表を最大4並列で取得し、report に詰める。
 
-    CatalogError は schedule_failures に積んで続行し、それ以外の例外は送出する。
-    各件で progress を呼び、lists・area_failures・schedule_failures をソートする。
-    取り消されたら残りを打ち切る。
+    `CatalogError` は `schedule_failures` に積んで続行し、それ以外の例外は送出する。
+    各件で `progress` を呼び、結果をソートする（取り消されたら残りを打ち切る）。
     """
     jobs = [(station.station.id, day) for station in report.stations for day in span.days]
     failed = 0

@@ -575,9 +575,8 @@ class Screen:
     def handle(self, key: str) -> None:
         """キー入力を現在の area に振り分ける。ctrl-c は常に終了。
 
-        login / chapters / filter / keyword / named / logout / seconds は各ハンドラへ、
-        help・device・failures は q / Esc（device は d も）で list へ戻る。list では
-        esc → 通知消去 → 移動系 → 一覧操作の順に処理する。
+        各モーダルは専用ハンドラへ、help・device・failures は q / Esc（device は d も）で
+        list へ戻る。list は esc → 通知消去 → 移動系 → 一覧操作の順に処理する。
         """
         self.clock += 0.05
         self._expire_info()

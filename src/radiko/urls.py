@@ -1,8 +1,7 @@
 """本番の配信先を組み立て、試験のときだけ 127.0.0.1 へ載せ替える。
 
-経路そのものは `https://radiko.jp`、`api.radiko.jp`、`radiko-cf.com`、
-`smartstream.ne.jp` のままである。`RADIKO_LOOPBACK_ORIGIN` は
-`http://127.0.0.1:ポート` だけを許し、パスとクエリは変えない。
+経路は `radiko.jp` / `api.radiko.jp` / `radiko-cf.com` / `smartstream.ne.jp` のまま。
+`RADIKO_LOOPBACK_ORIGIN` は `http://127.0.0.1:ポート` だけを許し、パスとクエリは変えない。
 """
 
 from __future__ import annotations

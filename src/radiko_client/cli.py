@@ -259,9 +259,8 @@ def _restore_sigint(previous) -> None:
 def member_command(command: str, store: SessionStore) -> None:
     """`login` / `session` / `logout` を実行する。
 
-    logout は保存セッションを削除。session は保存済みセッションの有効性と契約を表示。
-    login は対話端末でメールと非表示パスワードを受け取り、保存して契約を表示する。
-    セッションの読み込み失敗はファイルを残したまま未ログインとして扱う。
+    logout は削除、session は有効性と契約表示、login は対話端末で認証して保存・表示する。
+    読み込み失敗は既存ファイルを保持して未ログインとして扱う。
     """
     if command == "logout":
         store.delete()
@@ -410,9 +409,8 @@ def _parse_u32(text: str) -> int:
 def searches(args: list[str], data_dir: Path | None) -> None:
     """`searches` のサブコマンドを実行する（list / show / restore / save / delete）。
 
-    保存・一覧・削除は通信しない。`save NAME <programs の条件>` は表示オプションを拒否。
-    `show` は名前が無ければ SearchError("missing")。`restore` は保存条件を当日へ戻して
-    JSON で出し、復元できなければ既定条件（当日・全国・指定なし）を使う。
+    通信せず、`save` は表示オプションを拒否、`show` の未登録は `SearchError("missing")`。
+    `restore` は保存条件を当日へ戻して JSON で出し、復元失敗時は既定条件を使う。
     """
     if args == ["--help"]:
         stdout_ln(SEARCHES_USAGE)
@@ -466,9 +464,8 @@ def searches(args: list[str], data_dir: Path | None) -> None:
 def programs(args: list[str], data_dir: Path | None) -> None:
     """`programs` を実行する。
 
-    `--help` は使い方。`--saved NAME` / `--restore` は保存条件、それ以外は引数から
-    条件を作る。取得前に直近条件を保存し（失敗は stderr で継続）、1局1日なら
-    `_print_station_day`、複数局・複数日なら `_acquire` を使う。
+    `--help` は使い方、`--saved` / `--restore` は保存条件、それ以外は引数から条件を作る。
+    直近条件を保存（失敗は stderr で継続）し、1局1日は `_print_station_day`、他は `_acquire`。
     """
     if args == ["--help"]:
         stdout_ln(PROGRAMS_HELP)
@@ -826,9 +823,8 @@ def chapters(args: list[str]) -> None:
 def play(args: list[str], data_dir: Path | None) -> None:
     """`play-live` / `play-timefree` を実行する。
 
-    `--seconds` / `--offset` / `--interactive` を解釈し、保存セッションを要求する。
-    Ctrl+C と対話コマンドを prepare.play_station に渡し、開始情報・終了理由・出力統計を
-    stdout に出す。キャンセルは「中断しました」で正常終了する。
+    `--seconds` / `--offset` / `--interactive` と保存セッションで `prepare.play_station` を呼ぶ。
+    開始情報・終了理由・出力統計を stdout に出し、キャンセルは「中断しました」で正常終了する。
     """
     if len(args) == 2 and args[1] == "--help":
         stdout_ln(PLAY_USAGE)
@@ -935,9 +931,8 @@ def play(args: list[str], data_dir: Path | None) -> None:
 def _play_request(args: list[str], now: datetime):
     """再生コマンドの引数を解釈する。
 
-    `--seconds` は1〜86400、`--offset` は 0〜86400 秒。live の positional は1つ、
-    timefree は2つ。live への `--offset` と timefree の未来時刻は拒否する。
-    戻り値は (mode, station, cursor, seconds, offset, interactive)。
+    `--seconds`（1〜86400）と `--offset`（0〜86400、live は不可）や未来時刻を検証する。
+    戻り値は `(mode, station, cursor, seconds, offset, interactive)`。
     """
     positional = []
     seconds = offset = None

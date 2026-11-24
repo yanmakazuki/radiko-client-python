@@ -1,7 +1,6 @@
 """音声出力。Linux は libasound の default。試験はプロセス内 null sink。
 
-`RADIKO_NULL_SINK=1` は、Rust 版 CI の PulseAudio null sink に相当する
-プロセス内の出力である。ハードウェアクロックは進めず、渡したフレーム数だけ進む。
+`RADIKO_NULL_SINK=1` は Rust 版 CI の null sink 相当で、渡したフレーム数だけ進む。
 `RADIKO_ALSA_LOG=1` のときだけ ALSA の診断を標準エラーに残す。
 """
 

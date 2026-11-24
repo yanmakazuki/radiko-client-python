@@ -250,9 +250,8 @@ class Filter:
     ) -> Filter:
         """分類IDとキーワードを検証して正規化した Filter を作る。
 
-        分類IDの各要素は空文字・128バイト超・制御文字で ValueError（空リストは有効）。
-        キーワードは空文字・1024バイト超・制御文字で ValueError。作った条件は `matches`
-        が軸間 AND・同一軸内 OR で評価する。
+        分類IDは空・128バイト超・制御文字で ValueError（空リストは有効）、キーワードは
+        空・1024バイト超・制御文字で ValueError。`matches` は軸間 AND・同一軸内 OR。
         """
         keyword_text = None if keyword is None else keyword.strip()
         if keyword_text is not None and (
