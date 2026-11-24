@@ -32,6 +32,17 @@ class ProbeError(Exception):
         """この失敗を `stage` の文脈で包んだ新しい ProbeError("at") を返す。元は inner に残す。"""
         return ProbeError("at", stage=stage, inner=self)
 
+    def unwrap_at(self) -> ProbeError:
+        """`at` で包まれていれば1段だけ内側の ProbeError を返し、そうでなければ自身を返す。"""
+        return self.inner if self.code == "at" and self.inner is not None else self
+
+    def is_transient_http(self) -> bool:
+        """`at` を1段はがした上で、通信失敗（network）または HTTP 408 / 5xx なら True を返す。"""
+        current = self.unwrap_at()
+        if current.code == "network":
+            return True
+        return current.code == "http" and (current.status == 408 or (current.status or 0) >= 500)
+
     def __str__(self) -> str:
         """at は「段階: 内側」、それ以外は code に対応する日本語メッセージを返す。"""
         if self.code == "at" and self.inner is not None and self.stage is not None:

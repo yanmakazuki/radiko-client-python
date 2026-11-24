@@ -212,9 +212,7 @@ def _request(
 
 def _retryable(error: ProbeError) -> bool:
     """やり直してよい ProbeError か。network と http の 408/5xx を対象にする。"""
-    if error.code == "network":
-        return True
-    return error.code == "http" and (error.status == 408 or (error.status or 0) >= 500)
+    return error.is_transient_http()
 
 
 def _backoff(attempt: int, cancelled, record: bool) -> None:
