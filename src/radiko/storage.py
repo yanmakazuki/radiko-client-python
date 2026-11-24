@@ -253,6 +253,8 @@ class SessionStore:
         except OSError as error:
             raise StorageError("io", io_kind(error)) from error
         _regular(metadata)
+        # TOCTOU によるシンボリックリンク差し替えと、FIFO 等での無限ブロックを防ぐため、
+        # O_NOFOLLOW | O_NONBLOCK で開いた fd を再度 fstat して検証する。
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError as error:
@@ -412,6 +414,8 @@ class SearchStore:
             self.base._ensure_directory()
         except StorageError as error:
             raise SearchError("storage", error) from error
+        # _atomic_write が os.replace で searches.json の inode を差し替えるため、
+        # 本体を flock すると置換後に排他が別 inode に分かれてしまう。
         path = self.base.directory / "searches.lock"
         if path.is_symlink():
             raise SearchError("storage", StorageError("path"))
@@ -503,6 +507,8 @@ def _atomic_write(directory: Path, path: Path, payload: bytes) -> None:
     ディレクトリを fsync する。
     """
     tmp = directory / f".{path.name}.{os.getpid()}.tmp"
+    # umask や既存ファイルの権限に影響されず確実に 0600 とし、
+    # rename 後のディレクトリエントリまで永続化するため fchmod・chmod・fsync を行う。
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         os.fchmod(fd, 0o600)
