@@ -21,10 +21,10 @@
 - [`ChapterSet`](../src/radiko/domain.py#L190): チャプターの集合。
 - [`Filter`](../src/radiko/domain.py#L218): 検索条件。
 - [`Scope`](../src/radiko/domain.py#L427): 検索範囲。
-- [`is_valid_station_id`](../src/radiko/domain.py#L455): 保存・通信に使える局IDか。
+- [`is_valid_station_id`](../src/radiko/domain.py#L455): 有効な局IDか。
 - [`SearchCriteria`](../src/radiko/domain.py#L470): 検索条件の一式。
 - [`criteria_from_file`](../src/radiko/domain.py#L530): 保存用の辞書から SearchCriteria を復元する。
-- [`parse_ymd`](../src/radiko/domain.py#L563): YYYYMMDD を date にする。
+- [`parse_ymd`](../src/radiko/domain.py#L563): YYYYMMDD の8桁 ASCII 数字を date にする。
 
 ### [radiko.catalog](../src/radiko/catalog.py)
 
@@ -173,7 +173,7 @@ session.json と searches.json。
 - [`graphemes`](../src/radiko/text.py#L35): 拡張書記素クラスタ。
 - [`display_width`](../src/radiko/text.py#L42): 表示幅0の文字（結合文字・書式文字・C0とDEL）は0、全角と全幅は2、それ以外のクラスタは1。
 - [`clean_text`](../src/radiko/text.py#L84): 空白は一つに畳み、Cc の制御文字は捨てる。
-- [`strip_control`](../src/radiko/text.py#L89): Cc の制御文字だけを除き、空白はそのまま保つ。
+- [`strip_control`](../src/radiko/text.py#L89): 空白を畳まず、改行・タブを含むすべての Cc 制御文字だけを除去する。
 
 ### [radiko.timing](../src/radiko/timing.py)
 
