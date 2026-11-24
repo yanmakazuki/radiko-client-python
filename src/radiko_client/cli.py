@@ -40,7 +40,6 @@ from radiko.output import (
     probe_tone,
 )
 from radiko.storage import (
-    DataDir,
     SearchError,
     SearchStore,
     SessionStore,
@@ -201,16 +200,12 @@ def split_data_dir(args: list[str]) -> tuple[list[str], Path | None]:
 
 def _session_store(data_dir: Path | None) -> SessionStore:
     """SessionStore を返す。`--data-dir` が無ければ既定の保存先を使う。"""
-    if data_dir is not None:
-        return SessionStore(data_dir)
-    return SessionStore.default()
+    return SessionStore.for_dir(data_dir)
 
 
 def _search_store(data_dir: Path | None) -> SearchStore:
     """SearchStore を返す。`--data-dir` が無ければ既定のデータ保存先を使う。"""
-    if data_dir is not None:
-        return SearchStore(data_dir)
-    return SearchStore(DataDir.default().directory)
+    return SearchStore.for_dir(data_dir)
 
 
 def inspect_chapters(args: list[str]) -> None:
@@ -303,18 +298,7 @@ def member_command(command: str, store: SessionStore) -> None:
 
 def _print_membership(membership) -> None:
     """契約を「ログイン有効 / エリアフリー: あり|なし|未確認 / タイムフリー30: …」で出す。"""
-
-    def label(value):
-        """True / False / None を あり / なし / 未確認 にする。"""
-        if value is True:
-            return "あり"
-        if value is False:
-            return "なし"
-        return "未確認"
-
-    stdout_ln(
-        f"ログイン有効 / エリアフリー: {label(membership.area_free)} / タイムフリー30: {label(membership.time_free_30)}"
-    )
+    stdout_ln(membership.status_line())
     stdout_ln("個別番組の再生可否は未確認です")
 
 
