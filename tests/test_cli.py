@@ -1,3 +1,5 @@
+"""CLI サブコマンドの引数検証、保存ファイル保護、終了コードの契約テスト。"""
+
 import json
 import os
 from pathlib import Path
@@ -9,12 +11,14 @@ FIXTURE = Path(__file__).parent / "fixtures" / "chapters.json"
 
 
 def run(args, capsys):
+    """CLI の main を呼び、終了コード・標準出力・標準エラーの3つ組を返す。"""
     code = main(args)
     captured = capsys.readouterr()
     return code, captured.out, captured.err
 
 
 def test_help_and_unknown_arguments(capsys):
+    """--help は終了コード0で一覧を出し、不明なサブコマンドは終了コード1とエラー行を返す。"""
     code, out, err = run(["--help"], capsys)
     assert code == 0
     assert "inspect-chapters" in out
@@ -26,6 +30,7 @@ def test_help_and_unknown_arguments(capsys):
 
 
 def test_session_logout_and_login_do_not_create_a_directory(tmp_path, capsys):
+    """未保存時の session / logout と失敗した login はデータディレクトリを作らず、パスワードも漏らさない。"""
     data = tmp_path / "data"
     code, out, err = run(["--data-dir", str(data), "session"], capsys)
     assert code == 0
@@ -48,6 +53,7 @@ def test_session_logout_and_login_do_not_create_a_directory(tmp_path, capsys):
 
 
 def test_corrupt_session_is_preserved(tmp_path, capsys):
+    """破損した session.json は session 確認では消さずに残し、明示的な logout でだけ削除する。"""
     os.chmod(tmp_path, 0o700)
     path = tmp_path / "session.json"
     path.write_bytes(b"corrupt-synthetic-session")
@@ -61,6 +67,7 @@ def test_corrupt_session_is_preserved(tmp_path, capsys):
 
 
 def test_data_dir_and_inspect_chapters(capsys):
+    """--data-dir の欠落・重複を拒否し、inspect-chapters が fixture の章と集計行を出力する。"""
     assert main(["session", "--data-dir"]) == 1
     assert main(["session", "--data-dir", "a", "--data-dir", "b"]) == 1
     code, out, err = run(["inspect-chapters", str(FIXTURE), "90", "0"], capsys)
@@ -70,6 +77,7 @@ def test_data_dir_and_inspect_chapters(capsys):
 
 
 def test_programs_and_output_and_playback_reject_bad_arguments(tmp_path, capsys):
+    """各サブコマンドの不正な引数は通信やディレクトリ作成の前に終了コード1で拒否する。"""
     data = tmp_path / "absent"
     for args in [
         ["programs"],
@@ -117,6 +125,7 @@ def test_programs_and_output_and_playback_reject_bad_arguments(tmp_path, capsys)
 
 
 def test_named_searches_round_trip_without_network(tmp_path, capsys):
+    """名前付き検索条件の保存・表示・一覧・起動時復元・削除が通信なしで完結する。"""
     data = tmp_path / "criteria"
     code, out, err = run(["--data-dir", str(data), "searches", "list"], capsys)
     assert code == 0
@@ -155,6 +164,7 @@ def test_named_searches_round_trip_without_network(tmp_path, capsys):
 
 
 def test_saved_search_does_not_overwrite_corrupt_storage(tmp_path, capsys):
+    """破損した searches.json は restore でも save でも上書きせず元のバイト列を残す。"""
     data = tmp_path / "data"
     for args in [
         ["searches", "save", "name", "../TBS"],
@@ -177,6 +187,7 @@ def test_saved_search_does_not_overwrite_corrupt_storage(tmp_path, capsys):
 
 
 def test_tui_help_hides_offline_and_non_tty_is_rejected(tmp_path, capsys):
+    """tui --help は試験用の --offline を隠し、非対話端末での起動は終了コード1で拒否する。"""
     data = tmp_path / "data"
     for args in [
         ["--help"],
@@ -196,6 +207,7 @@ def test_tui_help_hides_offline_and_non_tty_is_rejected(tmp_path, capsys):
 
 
 def test_probe_requires_a_session_before_any_directory_is_created(tmp_path, capsys):
+    """未ログイン時の probe / play はディレクトリを作らずに未ログインまたは放送前エラーを返す。"""
     data = tmp_path / "data"
     code, out, err = run(["--data-dir", str(data), "probe-live", "TBS"], capsys)
     assert code == 1
@@ -212,6 +224,7 @@ def test_probe_requires_a_session_before_any_directory_is_created(tmp_path, caps
 def test_interactive_messages_are_not_reprinted_and_header_precedes_the_result(
     tmp_path, capsys, monkeypatch
 ):
+    """再生中の通知は標準エラーへ重複出力せず、番組ヘッダが停止理由より先に出力される。"""
     from datetime import datetime, timezone
     from types import SimpleNamespace
 
@@ -228,6 +241,7 @@ def test_interactive_messages_are_not_reprinted_and_header_precedes_the_result(
     )
 
     def fake_play(*_args, **kwargs):
+        """on_ready と on_notice を順に呼んで PlayReport を返す偽の再生関数。"""
         kwargs["on_ready"](program)
         notice = kwargs.get("on_notice") or cli.stderr_ln
         notice("合成メッセージ")
@@ -257,6 +271,7 @@ def test_interactive_messages_are_not_reprinted_and_header_precedes_the_result(
 
 
 def test_interactive_invalid_switch_uses_the_single_rust_guidance():
+    """対話再生で日時の欠けた timefree 切替を入力すると、Rust版と同じ案内文を1件積む。"""
     from radiko.interactive import InteractiveControl
 
     control = InteractiveControl(3600, "live", "TBS")
@@ -267,6 +282,7 @@ def test_interactive_invalid_switch_uses_the_single_rust_guidance():
 
 
 def test_interactive_commands_reject_seconds_on_a_switch():
+    """対話コマンドの局切替は --seconds の同時指定を拒否する。"""
     now = __import__("datetime").datetime(
         2026, 10, 16, 12, 0, tzinfo=__import__("datetime").timezone.utc
     )
@@ -281,4 +297,5 @@ def test_interactive_commands_reject_seconds_on_a_switch():
 
 
 def test_closed_pipe_status_constant():
+    """SIGPIPE 相当の終了コード定数が 141 である。"""
     assert BROKEN_PIPE_STATUS == 141

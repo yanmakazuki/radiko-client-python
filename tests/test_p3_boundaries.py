@@ -17,9 +17,11 @@ from radiko.stream import ProbeError
 
 
 def test_prepare_authentication_goes_through_the_single_implementation(monkeypatch):
+    """prepare.authenticate_stream が radiko.auth.authenticate の単一実装を呼ぶ。"""
     seen = []
 
     def fake(fetch, session):
+        """受け取ったセッショントークンを記録して固定ヘッダーを返す。"""
         seen.append(session.token)
         return {"x-radiko-authtoken": "shared-token"}, "JP13"
 
@@ -31,9 +33,11 @@ def test_prepare_authentication_goes_through_the_single_implementation(monkeypat
 
 
 def test_prepare_authentication_adapter_keeps_the_production_urls(monkeypatch):
+    """authenticate_stream が本番の auth1 / auth2 URL・Cookie・partialkey・64KiB上限で通信する。"""
     calls = []
 
     def fake_get(url, headers=None, **kwargs):
+        """auth1 と auth2 の呼び出し引数を記録し、擬似応答を返す。"""
         calls.append((url, dict(headers or {}), kwargs.get("limit")))
         if url.endswith("/v2/api/auth1"):
             return SimpleNamespace(
@@ -61,7 +65,10 @@ def test_prepare_authentication_adapter_keeps_the_production_urls(monkeypatch):
 
 
 def test_authenticate_maps_malformed_key_headers_to_auth_format():
+    """auth1 の keyoffset が数値でない場合は ProbeError('auth-format') にする。"""
+
     def fetch(path, _headers):
+        """壊れた keyoffset ヘッダーを持つ auth1 応答を返す。"""
         return SimpleNamespace(
             headers={
                 "x-radiko-authtoken": "token",
@@ -77,7 +84,10 @@ def test_authenticate_maps_malformed_key_headers_to_auth_format():
 
 
 def test_authenticate_rejects_missing_tokens_and_bad_areas():
+    """auth1 のヘッダー欠落や auth2 の不正エリア・非UTF-8応答を適切なエラーコードで拒否する。"""
+
     def missing(_path, _headers):
+        """必須ヘッダーの無い応答を返す。"""
         return SimpleNamespace(headers={}, body=b"JP13")
 
     with pytest.raises(ProbeError) as raised:
@@ -85,9 +95,11 @@ def test_authenticate_rejects_missing_tokens_and_bad_areas():
     assert raised.value.code == "auth-format"
 
     def area(body):
+        """1回目は正常な auth1、2回目は指定した body の auth2 を返す fetch を作る。"""
         state = {"first": True}
 
         def fetch(_path, _headers):
+            """呼び出し順に応じて auth1 または auth2 の応答を返す。"""
             if state["first"]:
                 state["first"] = False
                 return SimpleNamespace(
@@ -110,9 +122,11 @@ def test_authenticate_rejects_missing_tokens_and_bad_areas():
 
 
 def test_reauth_uses_the_injected_refresh():
+    """ReauthState.renew が初回は注入された refresh を呼び、20秒以内はトークンを再利用する。"""
     calls = []
 
     def refresh(session, _cancelled):
+        """セッショントークンを記録して新しい authtoken を返す。"""
         calls.append(session.token)
         return {"x-radiko-authtoken": "new"}, "JP13"
 
@@ -128,6 +142,7 @@ def test_reauth_uses_the_injected_refresh():
 
 
 def test_output_types_live_in_audio_and_are_reexported():
+    """音声出力の型は radiko.audio を実体とし、output と coreaudio から同じ型を参照できる。"""
     assert output.OutputError is audio.OutputError
     assert output.OutputInfo is audio.OutputInfo
     assert output.OutputSummary is audio.OutputSummary

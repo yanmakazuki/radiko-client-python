@@ -59,6 +59,7 @@ def transport_url(url: str) -> str:
             return url
         query = f"?{parts.query}" if parts.query else ""
         return f"{origin}{parts.path}{query}"
+    # すでにループバックへ書き換え済みの URL が再帰的に渡された場合もそのまま通す。
     if origin and parts.scheme == "http" and parts.hostname == "127.0.0.1" and parts.port:
         return url
     raise ProbeError("unsafe")

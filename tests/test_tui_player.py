@@ -1,3 +1,5 @@
+"""TUI の書記素編集、コンパクト描画、通知優先度、ADTS 復号の単体テスト。"""
+
 from datetime import datetime, timedelta, timezone
 
 from radiko.catalog import parse_programs
@@ -19,10 +21,12 @@ JST = timezone(timedelta(hours=9))
 
 
 def program(title, start, end, station="TBS"):
+    """テスト用の最小 Program を作る。"""
     return Program(ProgramKey(station, start), "id", end, title)
 
 
 def test_grapheme_editor_moves_by_cluster_not_code_unit():
+    """結合文字を含む書記素クラスタ単位でカーソル移動・削除・表示幅計算を行う。"""
     editor = LineEditor.new("", 1024)
     editor.handle("あ")
     editor.handle("a\u0301")
@@ -38,6 +42,7 @@ def test_grapheme_editor_moves_by_cluster_not_code_unit():
 
 
 def test_compact_layout_drops_clock_before_state_and_wraps_notices():
+    """狭い幅では再生行の時刻から先に省略し、全角文字列を表示幅で折り返し・切り詰める。"""
     assert hint(4) == ""
     assert "操作一覧" in hint(80)
     assert playback_line("番組", "再生中", "12:00 / 55:00", 8) == "番組"
@@ -48,6 +53,7 @@ def test_compact_layout_drops_clock_before_state_and_wraps_notices():
 
 
 def test_keyword_preview_is_uncommitted_and_enter_bumps_generation():
+    """キーワード入力中は一覧を確定せず件数プレビューだけ出し、Enter で世代と確定条件を進める。"""
     now = datetime(2026, 10, 15, 6, 30, tzinfo=JST)
     programs = [
         program("朝刊", now - timedelta(hours=1), now + timedelta(minutes=30)),
@@ -68,6 +74,7 @@ def test_keyword_preview_is_uncommitted_and_enter_bumps_generation():
 
 
 def test_notices_keep_hidden_warnings_and_errors_survive_typing():
+    """エラー通知は警告を裏に退避して文字入力中も残り、Esc で退避した警告へ戻る。"""
     now = datetime(2026, 10, 15, 6, 30, tzinfo=JST)
     screen = Screen([program("朝", now - timedelta(minutes=5), now + timedelta(minutes=5))], now)
     screen._set_notice(NoticeLevel.WARNING, "警告", sticky=True)
@@ -84,6 +91,7 @@ def test_notices_keep_hidden_warnings_and_errors_survive_typing():
 
 
 def test_on_air_selection_and_upcoming_does_not_replace_playback():
+    """n で放送中番組へ移動でき、放送前の番組で Enter を押しても現在の再生を止めない。"""
     now = datetime(2026, 10, 15, 6, 30, tzinfo=JST)
     current = program("いま", now - timedelta(minutes=10), now + timedelta(minutes=10))
     later = program("あと", now + timedelta(hours=3), now + timedelta(hours=4))
@@ -98,6 +106,7 @@ def test_on_air_selection_and_upcoming_does_not_replace_playback():
 
 
 def test_escape_on_the_main_screen_does_not_quit():
+    """通常画面の Esc は終了せず案内通知を出して消し、q で終了する。"""
     now = datetime(2026, 10, 15, 12, 0, tzinfo=JST)
     screen = Screen([], now, height=COMPACT_HEIGHT)
     screen.handle("esc")
@@ -112,6 +121,7 @@ def test_escape_on_the_main_screen_does_not_quit():
 
 
 def test_pause_keeps_the_frames_already_sent(monkeypatch):
+    """再生途中で paused がセットされたら、そこまでに送った量子単位のフレーム数で止まる。"""
     import threading
 
     from radiko.output import play_samples
@@ -121,6 +131,7 @@ def test_pause_keeps_the_frames_already_sent(monkeypatch):
     stop = threading.Event()
 
     def hook(played):
+        """4800 フレーム送出時点で一時停止をセットする。"""
         if played >= 4800:
             paused.set()
 
@@ -131,6 +142,7 @@ def test_pause_keeps_the_frames_already_sent(monkeypatch):
 
 
 def test_adts_rejects_crc_and_decodes_a_generated_frame():
+    """合成 ADTS を復号でき、CRC 付きフレームや HE-AAC 宣言に対する LC 音声は拒否する。"""
     from radiko.fixtures import encode_adts_sine
 
     data = encode_adts_sine()
@@ -158,6 +170,7 @@ def test_adts_rejects_crc_and_decodes_a_generated_frame():
 
 
 def test_fixture_schedule_is_not_compared_to_itself():
+    """番組表 XML fixture から局名と実体参照展開済みの番組タイトルを解析する。"""
     listing = parse_programs(
         (__import__("pathlib").Path(__file__).parent / "fixtures" / "schedule.xml").read_bytes(),
         "TBS",

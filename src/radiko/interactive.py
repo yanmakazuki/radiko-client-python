@@ -55,6 +55,7 @@ class InteractiveControl:
         elif text == "resume":
             if self.paused:
                 self.paused = False
+                # ライブの一時停止解除は遅れたバッファを追わず、現在時刻の先頭（0.0）へ張り替える。
                 if self.mode == "live":
                     self._request(0.0)
                 else:

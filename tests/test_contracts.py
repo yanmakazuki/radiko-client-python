@@ -32,10 +32,12 @@ JST = timezone(timedelta(hours=9))
 
 
 def at(text: str) -> datetime:
+    """ISO 8601 文字列をタイムゾーン付き datetime に変換する。"""
     return datetime.fromisoformat(text)
 
 
 def test_broadcast_day_uses_jst_five_am_not_local_midnight():
+    """入力のタイムゾーンにかかわらず、日本時間の午前5時を放送日の境界にする。"""
     assert broadcast_day(at("2026-10-25T04:30:00+09:00")) == date(2026, 10, 24)
     assert broadcast_day(at("2026-10-25T05:00:00+09:00")) == date(2026, 10, 25)
     assert broadcast_day(at("2026-10-01T19:30:00+00:00")) == date(2026, 10, 1)
@@ -47,6 +49,7 @@ def test_broadcast_day_uses_jst_five_am_not_local_midnight():
 
 
 def test_timefree_deadlines_follow_the_morning_after_the_end_broadcast_day():
+    """タイムフリーの無料期限（+7日）と有料期限（+30日）は終了時刻が属する放送日の翌朝05:00を起点にする。"""
     cases = [
         ("2026-10-01T12:00:00+09:00", "2026-10-09T05:00:00+09:00", "2026-11-01T05:00:00+09:00"),
         ("2026-10-02T04:59:59+09:00", "2026-10-09T05:00:00+09:00", "2026-11-01T05:00:00+09:00"),
@@ -70,6 +73,7 @@ def test_timefree_deadlines_follow_the_morning_after_the_end_broadcast_day():
 
 
 def test_contract_and_blackout_are_separate_from_the_seven_and_thirty_day_edges():
+    """無料期限・30日期限の境界と、タイムフリー30契約不足・配信対象外（黒枠）の判定を区別する。"""
     end = at("2026-10-01T12:00:00+09:00")
     program = SlotProgram(at("2026-10-01T10:00:00+09:00"), end, (True, True, True, True), False)
     free = at("2026-10-09T05:00:00+09:00")
@@ -90,6 +94,7 @@ def test_contract_and_blackout_are_separate_from_the_seven_and_thirty_day_edges(
 
 
 def test_schedule_fixture_keeps_split_slots_and_drops_duplicates():
+    """番組表 XML から分割枠を維持しつつ重複・不正枠を集計し、分類とキーワードの Filter で照合する。"""
     listing = parse_programs((ROOT / "schedule.xml").read_bytes(), "TBS", date(2026, 10, 15))
     assert [item.title for item in listing.programs] == ["境界 & 番組", "朝 & 続編", "深夜"]
     assert listing.invalid_count == 1
@@ -109,6 +114,7 @@ def test_schedule_fixture_keeps_split_slots_and_drops_duplicates():
 
 
 def test_chapter_fixture_prefers_long_titles_and_drops_music():
+    """チャプター JSON は titleLong を優先し、楽曲（isMusic=True）と不正項目を数えて除外する。"""
     parsed = parse_chapters((ROOT / "chapters.json").read_bytes(), 90, 0)
     assert [(item.start, item.end, item.title) for item in parsed.chapters] == [
         (0.0, 30.0, "オープニング"),
@@ -121,6 +127,7 @@ def test_chapter_fixture_prefers_long_titles_and_drops_music():
 
 
 def test_range_is_inclusive_and_at_most_thirty_broadcast_days():
+    """BroadcastRange は両端を含み、逆転した日付や30放送日を超える範囲を拒否する。"""
     assert len(BroadcastRange.new(date(2026, 10, 14), date(2026, 10, 15)).days) == 2
     with pytest.raises(ValueError):
         BroadcastRange.new(date(2026, 10, 15), date(2026, 10, 14))
@@ -129,6 +136,7 @@ def test_range_is_inclusive_and_at_most_thirty_broadcast_days():
 
 
 def test_session_and_named_search_files_match_the_rust_json_shape(tmp_path: Path):
+    """session.json と searches.json の整形バイト列、0700/0600 権限、破損ファイルの保護が Rust 版と一致する。"""
     store = SessionStore(tmp_path)
     store.save(MemberSession("synthetic-token"))
     assert store.path.read_bytes() == b'{"version":1,"session":{"token":"synthetic-token"}}\n'
@@ -190,6 +198,7 @@ def test_session_and_named_search_files_match_the_rust_json_shape(tmp_path: Path
 
 
 def test_corrupt_permissions_and_symlink_are_rejected(tmp_path: Path):
+    """0600 以外の権限やシンボリックリンクに差し替えられた session.json の読み込みを拒否する。"""
     store = SessionStore(tmp_path)
     store.save(MemberSession("synthetic-token"))
     os.chmod(store.path, 0o644)
@@ -209,7 +218,10 @@ def test_corrupt_permissions_and_symlink_are_rejected(tmp_path: Path):
 
 
 def test_hls_live_ignores_a_slightly_older_window_and_timefree_does_not():
+    """ライブ再生は少し古い通し番号の窓を無視して進み、タイムフリーは窓が先に進むとエラーにする。"""
+
     def playlist(first, count, end=False):
+        """指定した先頭通し番号と件数の合成メディアプレイリストを返す。"""
         lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:5", f"#EXT-X-MEDIA-SEQUENCE:{first}"]
         for number in range(first, first + count):
             lines.append("#EXTINF:5,")
@@ -233,6 +245,7 @@ def test_hls_live_ignores_a_slightly_older_window_and_timefree_does_not():
 
 
 def test_hls_rejects_features_the_rust_parser_refuses():
+    """暗号化キー（NONE以外）、BYTERANGE、I-FRAMES-ONLY、空の MAP URI を持つプレイリストを拒否する。"""
     base = ["#EXTM3U", "#EXT-X-TARGETDURATION:5", "#EXT-X-MEDIA-SEQUENCE:1"]
     for feature in [
         '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
@@ -249,6 +262,7 @@ def test_hls_rejects_features_the_rust_parser_refuses():
 
 
 def test_rfc3339_keeps_the_offset_and_microseconds_of_the_value():
+    """rfc3339 は datetime が持つ UTC オフセットとミリ秒桁を保って整形する。"""
     utc = datetime(2026, 10, 15, 5, 0, 0, 123000, tzinfo=timezone.utc)
     assert rfc3339(utc) == "2026-10-15T05:00:00.123+00:00"
     jst = datetime(2026, 10, 15, 14, 0, 0, tzinfo=JST)
@@ -256,6 +270,7 @@ def test_rfc3339_keeps_the_offset_and_microseconds_of_the_value():
 
 
 def test_chapter_boolean_time_fields_are_invalid_like_the_rust_parser():
+    """fromSec / toSec に真偽値が入ったチャプター項目を数値として扱わず不正項目として弾く。"""
     body = json.dumps({"chapters": [{"fromSec": 0, "toSec": True, "title": "not a time"}]}).encode()
     with pytest.raises(Exception) as rejected:
         parse_chapters(body, 90.0, 0.0)
@@ -263,6 +278,7 @@ def test_chapter_boolean_time_fields_are_invalid_like_the_rust_parser():
 
 
 def test_http_only_accepts_exact_trusted_hosts_and_a_local_port():
+    """HTTP クライアントは信頼ドメインの HTTPS 標準ポートとポート付き 127.0.0.1 だけを許可する。"""
     for url in [
         "https://radiko.jp/a",
         "https://api.radiko.jp/a",
@@ -283,7 +299,10 @@ def test_http_only_accepts_exact_trusted_hosts_and_a_local_port():
 
 
 def test_huge_mp4_sample_count_is_rejected_before_decode():
+    """trun のサンプル数が上限を超える MP4 はデコーダに渡す前に AacError('many') で拒否する。"""
+
     def atom(kind: bytes, payload: bytes) -> bytes:
+        """4バイトのサイズと型名を先頭に付けた MP4 ボックスを作る。"""
         return (len(payload) + 8).to_bytes(4, "big") + kind + payload
 
     trun = atom(b"trun", bytes([0, 0, 0, 0, 255, 255, 255, 255]))
@@ -294,6 +313,7 @@ def test_huge_mp4_sample_count_is_rejected_before_decode():
 
 
 def test_status_boundaries():
+    """放送開始1秒前は upcoming、開始時刻ちょうどは on_air、終了時刻ちょうどは finished になる。"""
     start = at("2026-10-15T06:00:00+09:00")
     end = at("2026-10-15T07:00:00+09:00")
     assert broadcast_status(start, end, start - timedelta(seconds=1)) == "upcoming"
@@ -302,6 +322,7 @@ def test_status_boundaries():
 
 
 def test_session_repr_hides_the_token():
+    """MemberSession の repr はトークン文字列を伏せ、<hidden> に置き換える。"""
     session = MemberSession("synthetic-token")
     assert "synthetic-token" not in repr(session)
     blob = json.dumps({"token": session.token})

@@ -56,6 +56,7 @@ def trim_pcm(
     delta = (target - start).total_seconds()
     if delta < 0:
         raise ProbeError("playlist")
+    # 浮動小数点の丸め誤差で目標時刻より前のサンプルが残らないよう、ナノ秒整数から切り上げでフレーム数を求める。
     nanos = int(round(delta * 1_000_000_000))
     skip = (nanos * rate + 1_000_000_000 - 1) // 1_000_000_000
     frames = len(samples) // channels
@@ -95,6 +96,7 @@ class ReconnectBudget:
         if step <= 0:
             raise ProbeError("reconnect")
         left = step
+        # 最大10秒のバックオフ中も停止要求へ即座に応答できるよう、10ms 単位に刻んで待機する。
         while left > 0:
             if self.cancelled():
                 raise ProbeError("cancelled")

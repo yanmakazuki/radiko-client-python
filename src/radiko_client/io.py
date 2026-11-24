@@ -43,6 +43,7 @@ def stdout_ln(text: str = "") -> None:
     except BrokenPipeError as error:
         raise ClosedPipe() from error
     except OSError as error:
+        # Rust の ErrorKind::StorageFull に合わせ、ENOSPC (28) は StorageFull として扱う。
         kind = "StorageFull" if getattr(error, "errno", None) == 28 else error.__class__.__name__
         raise WriteFailed(kind) from error
 

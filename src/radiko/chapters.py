@@ -60,6 +60,7 @@ def chapters_from_json(root, slot_seconds: float, offset_seconds: float) -> Chap
         if "isMusic" in item and not isinstance(item.get("isMusic"), bool):
             result.invalid_count += 1
             continue
+        # Python では isinstance(True, int) が真になるため、bool は明示的に弾く。
         start = item.get("fromSec")
         end = item.get("toSec")
         if (
@@ -72,6 +73,7 @@ def chapters_from_json(root, slot_seconds: float, offset_seconds: float) -> Chap
             continue
         start_f = float(start) + offset_seconds
         end_f = float(end) + offset_seconds
+        # start_f != start_f で NaN を弾き、補正後も放送枠 [0, slot_seconds] に収まる枠だけ残す。
         if (
             float(start) < 0
             or float(end) <= float(start)
@@ -95,6 +97,7 @@ def chapters_from_json(root, slot_seconds: float, offset_seconds: float) -> Chap
             )
         )
     result.chapters.sort(key=lambda chapter: chapter.start)
+    # 楽曲だけで空になった番組は正常な空集合とし、不正項目しか無かったときだけエラーにする。
     if not result.chapters and result.invalid_count:
         raise ChapterError("none")
     return result

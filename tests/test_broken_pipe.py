@@ -8,6 +8,7 @@ import sys
 
 
 def test_closed_stdout_exits_141_without_an_error_line():
+    """読み手を閉じた標準出力パイプへ --help を書くと、エラー行を出さずに終了コード141で終わる。"""
     read_fd, write_fd = os.pipe()
     os.close(read_fd)
     env = os.environ.copy()

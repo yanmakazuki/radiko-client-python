@@ -20,6 +20,7 @@ from radiko.storage import MemberSession
 
 
 def test_station_switch_does_not_grow_the_call_stack(monkeypatch):
+    """対話コマンドで局切替を1200回繰り返してもコールスタックが深くならず非再帰で回る。"""
     from radiko.prepare import play_station
 
     start = datetime.now(timezone.utc)
@@ -81,6 +82,7 @@ def test_station_switch_does_not_grow_the_call_stack(monkeypatch):
 
 
 def test_counters_are_returned_instead_of_mutated_lists():
+    """MP4 ボックス走査とバイナリ読取が可変リスト引数ではなく戻り値タプルで位置と件数を返す。"""
     data = box(b"ftyp", b"") + box(b"trun", words(0, 3))
     assert _walk(data, 0, 0, 0) == (2, 3)
     assert _take(words(7), 0) == (7, 4)
@@ -88,12 +90,18 @@ def test_counters_are_returned_instead_of_mutated_lists():
 
 
 def test_no_function_level_imports_remain():
+    """src/ 配下の全モジュールに関数内 import が1件も無いことを AST で検証する。"""
+
     class Visitor(ast.NodeVisitor):
+        """関数のネスト深さを追跡し、関数内の import 文を収集するビジター。"""
+
         def __init__(self) -> None:
+            """深さと検出リストを初期化する。"""
             self.depth = 0
             self.modules: list[str] = []
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            """関数定義の内部を depth+1 で走査する。"""
             self.depth += 1
             self.generic_visit(node)
             self.depth -= 1
@@ -101,10 +109,12 @@ def test_no_function_level_imports_remain():
         visit_AsyncFunctionDef = visit_FunctionDef
 
         def visit_Import(self, node: ast.Import) -> None:
+            """関数内の import 文を記録する。"""
             if self.depth:
                 self.modules.extend(alias.name for alias in node.names)
 
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            """関数内の from ... import 文を記録する。"""
             if self.depth and node.module:
                 self.modules.append(node.module)
 
@@ -117,6 +127,7 @@ def test_no_function_level_imports_remain():
 
 
 def test_every_module_imports_alone_without_a_cycle():
+    """各モジュールを別プロセスで単独 import しても循環参照が起きない。"""
     modules = [
         "radiko.audio",
         "radiko.auth",
@@ -142,6 +153,7 @@ def test_every_module_imports_alone_without_a_cycle():
 
 
 def test_dead_helpers_and_single_element_imports_are_gone():
+    """廃止した簡易再生エンジンや未使用ヘルパー・__import__ 呼出が残っていないことを確認する。"""
     import importlib.util
 
     from radiko import fragmented, http_client, media

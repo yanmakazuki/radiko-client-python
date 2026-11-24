@@ -108,6 +108,7 @@ def criteria_from_request(request: ProgramRequest) -> SearchCriteria:
     """要求を SearchCriteria にする。局は station、47エリア全部は nationwide、それ以外は areas。"""
     if request.station:
         scope = Scope.station(request.station)
+    # 47都道府県すべてが揃っている場合は、保存形式を全国（nationwide）に正規化する。
     elif len(set(request.areas)) == 47:
         scope = Scope.nationwide()
     else:

@@ -30,6 +30,7 @@ def rfc3339(moment: datetime) -> str:
     )
     fraction = ""
     if moment.microsecond:
+        # Rust 版の整形に合わせ、ミリ秒単位で割り切れるときは3桁、それ以外は6桁にする。
         digits = f"{moment.microsecond:06d}"
         fraction = "." + (digits[:3] if moment.microsecond % 1000 == 0 else digits)
     offset = moment.utcoffset()

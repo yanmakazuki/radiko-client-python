@@ -32,6 +32,7 @@ class ReauthState:
         無ければ auth-expired。それ以外は refresh を1回呼ぶ。
         """
         recent = self.last is not None and self.now() - self.last < REAUTH_INTERVAL
+        # 同一エピソードの再401や20秒以内の連続401では auth1/auth2 を連打せず、保持中のトークンだけを返す。
         if self.episode or recent:
             if "x-radiko-authtoken" in headers:
                 return headers, "reused"
@@ -41,6 +42,7 @@ class ReauthState:
         try:
             refreshed, _area = self.refresh(self.session, self.cancelled)
         except ProbeError as error:
+            # キャンセル・レート制限・通信断・403 はセッション失効と区別し、元の失敗種別を保って上位へ伝える。
             if error.code == "cancelled":
                 raise ProbeError("cancelled").at(stage) from error
             if error.code == "limited":
