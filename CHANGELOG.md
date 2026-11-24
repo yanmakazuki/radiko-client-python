@@ -22,16 +22,30 @@
 - `prepare` とCLI入力境界のdocstringを追加 (#111)
 - `auth` / `media` / `stream` の複雑な分岐に「なぜ」コメントを追加 (#112)
 - 小モジュールのdocstringを追加 (#113)
+- ADRの索引とREADMEからの導線を追加 (#115)
+- `CHANGELOG.md` に `Unreleased` 節を追加 (#116)
+- 公開APIリファレンス（`docs/api.md`）を追加 (#117)
 
 ### 変更
 
 - `parity.md` のCIとモジュール境界を現行の3ジョブ構成・`dynamic_library`に合わせて更新 (#97)
+- `prepare._play_station` からセグメント取得と再接続回復を `_fetch_segment` に抽出 (#131)
+- `tui.Screen._filter_key` から候補ピッカー操作を `_picker_key` に分離 (#132)
+- 信頼ドメイン検証と408/5xx再試行判定の重複を `urls` / `stream` に集約 (#133)
+- `media` と `fragmented` のMP4ボックスヘッダ解析・定数・ADTSヘッダ読取を共通化 (#134)
+- 局ID検証・日付(`YYYYMMDD`)解析・制御文字除去の重複定義を `domain` / `text` に集約 (#135)
+- `SessionStore.load` と `SearchStore.load` の安全なファイル読込（`O_NOFOLLOW`・0600・上限検証）を共通化 (#136)
+- `prepare.inspect_hls` と `_open_media` のマスター/メディアプレイリスト解決ループを `_resolve_media_playlist` に統合 (#137)
+- CLI と TUI の契約表示・保存ストア生成・`LineEditor` 文字判定の重複を整理 (#138)
+- 未使用の内部ヘルパー・例外・定数と `__import__` 遅延呼出を整理 (#139)
 
 ### 修正
 
 - 音声出力バックエンドのdocstringを実装に合わせて修正 (#90)
 - ADRのAudioQueueの戻り値記述を実装に合わせて修正 (#96)
 - `eligible` のライブ終了時のコメントを実装に合わせて修正 (#114)
+- `display_width` のdocstringを実装に合わせて修正 (#119)
+- `parse_master_codec` のdocstringを実装に合わせて修正 (#121)
 
 ## [0.1.0] - 2026-11-15
 

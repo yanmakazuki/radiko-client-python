@@ -1,6 +1,6 @@
 # アーキテクチャ
 
-この文書は `radiko-client-python` のモジュール構成、依存方向、データの流れを説明します。対象は main `40660cd`（2026-11-15）です。Rust 版との機能対応は [parity.md](parity.md) を正とします。
+この文書は `radiko-client-python` のモジュール構成、依存方向、データの流れを説明します。対象は main `0acad84`（2026-11-24）です。Rust 版との機能対応は [parity.md](parity.md) を正とします。
 
 ## 全体像
 
@@ -140,9 +140,9 @@ flowchart TB
 1. 番組表: `catalog.parse_programs` が番組表 XML を `ProgramList`（`Program` の集合）へ変換します。`catalog.acquire_range` は地域・日付ごとに取得し、最大4並列で集めます。
 2. 準備: `prepare.prepare` が `fetch_program` で番組を確定し、`auth.authenticate` で auth1/auth2 を実行します。配信先 XML を `catalog.parse_endpoints` で読み、`_playlist_url` で HLS の URL を作ります。
 3. HLS: `hls.parse_media_playlist` がセグメント一覧を `MediaPlaylist` にします。`HlsCursor` が通し番号で次に取るセグメントを決め、`segment_schedule` が番組時刻を1パスで求めます。
-4. 取得と復号: `http_client.stream_get` がセグメントを取得します。ADTS は `media.AdtsDecoder`、fMP4 は `fragmented.FragmentedAacDecoder` が PCM にします。
+4. 取得と復号: `prepare._play_station` はセグメント取得と再接続回復を `_fetch_segment` に、復号・トリム・limit 切り詰めを `_decode_segment` に分けています。`_fetch_segment` が `http_client.stream_get` でセグメントを取得し、`_decode_segment` の中で ADTS は `media.AdtsDecoder`、fMP4 は `fragmented.FragmentedAacDecoder` が PCM にします。
 5. 出力: `output.open_stream` が OS に応じて ALSA / AudioQueue / null sink のストリームを返します。`play_samples` が音量とチャンネルを合わせて書き込みます。
-6. 提示: CLI は `PlayReport` / `ProbeReport` を表示に使います。TUI は `Screen` の状態として描画します。
+6. 提示: CLI は `PlayReport` / `ProbeReport` を表示に使います。TUI は `Screen` の状態として描画し、全条件編集（`_filter_key`）では地域・日付・分類の候補ピッカー操作を `_picker_key` に分けています。
 
 TUI の描画は状態を読むだけで、通信と復号を呼びません。通信は `_fetch_programs` などが `radiko.catalog` / `radiko.http_client` / `radiko.auth` / `radiko.prepare` の関数を呼び、復号と出力は `prepare.play_station` の再生ジョブが担います。`tui.py` は HTTP クライアントを実装しません。
 
@@ -162,5 +162,5 @@ TUI の描画は状態を読むだけで、通信と復号を呼びません。�
 ## 規模（実測）
 
 - BRIEF の基準値: ソース 27ファイル / 10,075行、テスト関数 229。
-- main `40660cd`: ソース 28ファイル / 10,337行、テスト関数 236（`def test_` の数）。P2 までの変更で `dynamic_library.py` が加わり、テスト関数も増えました。
+- main `0acad84`: ソース 28ファイル / 11,278行、テスト関数 236（`def test_` の数）。`dynamic_library.py` の追加と日本語 docstring・コメントの整備により行数が増えました。
 - 実行件数はパラメータ化を含むため、macOS で 254 passed + 3 skipped です。Linux CI の結果を最終根拠にします。
