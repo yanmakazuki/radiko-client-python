@@ -17,7 +17,7 @@ from urllib.parse import urlencode, urljoin, urlparse
 
 from radiko.catalog import CatalogError, decode_body
 from radiko.stream import ProbeError
-from radiko.urls import transport_url
+from radiko.urls import transport_url, trusted
 
 
 class Reply:
@@ -31,9 +31,6 @@ class Reply:
         self.url = url
 
 
-_TRUSTED_SUFFIXES = ("radiko.jp", "radiko-cf.com", "smartstream.ne.jp")
-
-
 def _allowed(url: str) -> None:
     """URL の送信先を検証する。認証情報付き URL は拒否し、http は 127.0.0.1 の明示ポートのみ、
     https は radiko.jp / radiko-cf.com / smartstream.ne.jp とそのサブドメインだけを許可する。
@@ -41,14 +38,9 @@ def _allowed(url: str) -> None:
     parsed = urlparse(url)
     if parsed.username or parsed.password:
         raise ProbeError("unsafe")
-    host = parsed.hostname or ""
-    if parsed.scheme == "http" and host == "127.0.0.1" and parsed.port:
+    if parsed.scheme == "http" and (parsed.hostname or "") == "127.0.0.1" and parsed.port:
         return
-    if (
-        parsed.scheme == "https"
-        and parsed.port in {None, 443}
-        and any(host == suffix or host.endswith(f".{suffix}") for suffix in _TRUSTED_SUFFIXES)
-    ):
+    if trusted(url):
         return
     raise ProbeError("unsafe")
 
