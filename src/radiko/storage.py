@@ -216,17 +216,24 @@ class SessionStore:
         ディレクトリ・ファイルは 0700/0600 と通常ファイル（リンク不可）を要求する。
         16KiB 超・JSON 不正・未知 version は StorageError。破損ファイルは削除せず残す。
         """
+        data = self._read_file(self.path, MAX_SESSION_BYTES)
+        if data is None:
+            return None
+        return _decode_session(data)
+
+    def _read_file(self, path: Path, max_bytes: int) -> bytes | None:
+        """0700 ディレクトリ配下の 0600 通常ファイルを上限サイズ以内で読む。無ければ None。"""
         if not self._directory_exists():
             return None
         try:
-            metadata = self.path.lstat()
+            metadata = path.lstat()
         except FileNotFoundError:
             return None
         except OSError as error:
             raise StorageError("io", io_kind(error)) from error
         _regular(metadata)
         try:
-            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError as error:
             raise StorageError("io", io_kind(error)) from error
         try:
@@ -234,12 +241,14 @@ class SessionStore:
             _regular(opened)
             if stat.S_IMODE(opened.st_mode) != 0o600:
                 raise StorageError("permissions")
-            data = os.read(fd, MAX_SESSION_BYTES + 1)
+            data = os.read(fd, max_bytes + 1)
+        except OSError as error:
+            raise StorageError("io", io_kind(error)) from error
         finally:
             os.close(fd)
-        if len(data) > MAX_SESSION_BYTES:
+        if len(data) > max_bytes:
             raise StorageError("invalid")
-        return _decode_session(data)
+        return data
 
     def save(self, session: MemberSession) -> None:
         """session.json を書く。
@@ -331,32 +340,11 @@ class SearchStore:
         壊れたファイルは SearchError("storage") にするが削除しない。
         """
         try:
-            if not self.base._directory_exists():
-                return Library()
-            try:
-                metadata = self.path.lstat()
-            except FileNotFoundError:
-                return Library()
-            _regular(metadata)
-            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            data = self.base._read_file(self.path, MAX_SEARCH_BYTES)
         except StorageError as error:
             raise SearchError("storage", error) from error
-        except OSError as error:
-            raise SearchError("storage", StorageError("io", io_kind(error))) from error
-        try:
-            opened = os.fstat(fd)
-            _regular(opened)
-            if stat.S_IMODE(opened.st_mode) != 0o600:
-                raise SearchError("storage", StorageError("permissions"))
-            data = os.read(fd, MAX_SEARCH_BYTES + 1)
-        except SearchError:
-            raise
-        except OSError as error:
-            raise SearchError("storage", StorageError("io", io_kind(error))) from error
-        finally:
-            os.close(fd)
-        if len(data) > MAX_SEARCH_BYTES:
-            raise SearchError("storage", StorageError("invalid"))
+        if data is None:
+            return Library()
         return _decode_library(data)
 
     def save_last(self, criteria: SearchCriteria) -> None:
