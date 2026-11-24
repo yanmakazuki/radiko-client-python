@@ -78,7 +78,9 @@
 - `programs` の引数解析と検索条件は `radiko_client.programs` に集約し、CLI と TUI が同じ実装を使う。簡易再生エンジン `radiko.player` は削除した。
 - `radiko.dynamic_library` は ctypes のライブラリ解決と読み込みをキャッシュする。`find_library` は名前ごと、`open_library` はパスごとに1つだけ返す。
 - `radiko.fragmented` の fMP4 解析は `_parse_tfhd` / `_parse_tfdt` / `_parse_trun` に分かれる。`radiko.prepare` の `_decode_segment` は1セグメントの復号・トリム・limit 判定を担う。
+- `radiko.prepare._play_station` はセグメント取得と再接続回復を `_fetch_segment` に、マスター/メディアプレイリスト解決は `_resolve_media_playlist` に統合し、`radiko_client.tui.Screen._filter_key` は候補ピッカー操作を `_picker_key` に分ける。
 - `radiko.prepare._sample` は取得（`_fetch_sample_blob`）・復号（`_decode_sample`）・レポート組み立てに分かれる。`radiko_client.tui.Screen.handle` は移動系を `_move_selection`、一覧操作を `_list_action` に分ける。
+- 局ID検証（`is_valid_station_id`）と日付解析（`parse_ymd`）は `radiko.domain`、制御文字除去（`strip_control`）は `radiko.text`、信頼ドメイン検証は `radiko.urls.trusted`、通信断・408/5xx の再試行判定は `radiko.stream.ProbeError.is_transient_http`、MP4 箱ヘッダ解析は `radiko.media._box_header`、保存ファイルの安全な読み込みとストア生成は `radiko.storage.SessionStore._read_file` / `for_dir` にそれぞれ集約する。
 - 関数内 import は無い。`tests/test_p3_cleanup.py` が固定する。
 
 ## CI
