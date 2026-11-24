@@ -53,14 +53,6 @@ def _allowed(url: str) -> None:
     raise ProbeError("unsafe")
 
 
-class _StaleConnection(Exception):
-    """接続再利用時の切断を表す内部例外。現行実装では送出せず、切断は http.client の例外から
-    ProbeError("network") へ写す。
-    """
-
-    pass
-
-
 class _ConnectionPool:
     """(scheme, host, port) ごとのアイドル接続。"""
 

@@ -95,9 +95,6 @@ def test_direct_playlist_wall_and_discontinuity_match_the_naive_walk():
     for sequence in range(990, 1020):
         assert timing.segment_wall(media, sequence) == _naive_wall(media, sequence)
         assert segment_discontinuity(media, sequence) == _naive_discontinuity(media, sequence)
-        assert prepare._segment_discontinuity(media, sequence) == _naive_discontinuity(
-            media, sequence
-        )
 
 
 def test_schedule_reuses_the_table_until_the_window_changes():

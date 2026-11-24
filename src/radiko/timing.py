@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import numpy as np
 
-from radiko.hls import segment_wall as _segment_wall
+from radiko.hls import segment_wall as segment_wall
 from radiko.media import AacError
 from radiko.stream import ProbeError
 
@@ -37,11 +38,6 @@ def accept_fragment(
         if delta < 0 or abs(_microseconds(media) - _microseconds(delta)) > 2000:
             raise AacError("container")
     return (decode_time, wall)
-
-
-def segment_wall(media, sequence: int) -> datetime | None:
-    """プレイリスト先頭から EXTINF を足して、その通し番号の番組時刻を求める。"""
-    return _segment_wall(media, sequence)
 
 
 def trim_pcm(
@@ -80,7 +76,7 @@ class ReconnectBudget:
     def __init__(self, cancelled, sleep=None):
         """待ち時間と backoff を初期化する。backoff は1秒から。"""
         self.cancelled = cancelled
-        self.sleep = sleep or __import__("time").sleep
+        self.sleep = sleep or time.sleep
         self.waited = 0.0
         self.backoff = BACKOFF_START
         self.steps: list[float] = []

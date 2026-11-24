@@ -181,11 +181,6 @@ def fetch_program(station: str, cursor: datetime, cancelled) -> ResolvedProgram:
     return parse_program(reply.body, station, cursor)
 
 
-def _rfc3339_secs(moment: datetime) -> str:
-    """秒精度の RFC3339（...Z）にする。タイムゾーンは変換しない。"""
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def parse_program(data: bytes, station: str, cursor: datetime) -> ResolvedProgram:
     """番組 JSON を検証して ResolvedProgram にする。
 
@@ -782,11 +777,6 @@ def _segment_at(media, sequence: int):
     return media.segments[sequence - start]
 
 
-def _segment_discontinuity(media, sequence: int):
-    """通し番号の累積不連続番号を返す。窓の外なら None。"""
-    return segment_discontinuity(media, sequence)
-
-
 def _refresh_playlist(
     url,
     source,
@@ -1225,7 +1215,7 @@ def _play_station(
                             continue
                         raise
                     continue
-                marker = _segment_discontinuity(media, sequence)
+                marker = segment_discontinuity(media, sequence)
                 if discontinuity is not None and marker != discontinuity:
                     reset_state()
                 discontinuity = marker

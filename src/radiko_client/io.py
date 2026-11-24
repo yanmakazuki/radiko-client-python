@@ -54,12 +54,3 @@ def stderr_ln(text: str = "") -> None:
         sys.stderr.flush()
     except OSError:
         return
-
-
-def stderr_write(text: str) -> None:
-    """stderr に文字列を書いて flush する。OSError は無視する。"""
-    try:
-        sys.stderr.write(text)
-        sys.stderr.flush()
-    except OSError:
-        return
