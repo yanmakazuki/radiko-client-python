@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import secrets
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, urljoin
@@ -36,6 +35,7 @@ from radiko.stream import (
     availability,
     eligible,
 )
+from radiko.text import strip_control
 from radiko.timing import ReconnectBudget, accept_fragment, segment_wall, trim_pcm
 from radiko.urls import append_query
 
@@ -261,7 +261,7 @@ def parse_program(data: bytes, station: str, cursor: datetime) -> ResolvedProgra
         event_id = None
     title = value.get("title")
     if isinstance(title, str):
-        title = "".join(char for char in title if unicodedata.category(char) != "Cc")[:512]
+        title = strip_control(title)[:512]
         title = title if title.strip() else None
     else:
         title = None

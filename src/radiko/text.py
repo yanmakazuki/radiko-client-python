@@ -86,6 +86,11 @@ def clean_text(text: str) -> str:
     return " ".join(text.translate(_CONTROL_TABLE).split())
 
 
+def strip_control(text: str) -> str:
+    """空白を畳まず、改行・タブを含むすべての Cc 制御文字だけを除去する。"""
+    return "".join(char for char in text if unicodedata.category(char) != "Cc")
+
+
 def has_control(text: str) -> bool:
     """Cc の制御文字を含むか。表示前に clean_text で落とす対象。"""
     return _CONTROL_PATTERN.search(text) is not None
