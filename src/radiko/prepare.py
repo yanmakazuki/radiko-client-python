@@ -18,6 +18,7 @@ from radiko.domain import JST, ProgramKey, broadcast_day
 from radiko.fragmented import FragmentedAacDecoder
 from radiko.hls import (
     HlsCursor,
+    MediaPlaylist,
     parse_attribute,
     parse_media_playlist,
     segment_discontinuity,
@@ -400,10 +401,18 @@ def _playlist_url(
 
 
 def inspect_hls(url: str, headers: dict[str, str], retain: bool, cancelled) -> ProbeReport:
-    """マスター/メディアプレイリストをたどり、先頭セグメントを probe する。
+    """マスター/メディアプレイリストをたどり、先頭セグメントを probe する。"""
+    current, media, encrypted = _resolve_media_playlist(url, headers, cancelled)
+    return _sample(media, current, headers, media.declared_codec, retain, cancelled, encrypted)
 
-    マスター/メディアの取得は最大4回。帯域が最小のバリアントを選び、暗号化の宣言を
-    引き継ぐ。メディアプレイリストが得られない場合は `ProbeError("playlist")`。
+
+def _resolve_media_playlist(
+    url: str, headers: dict[str, str], cancelled
+) -> tuple[str, MediaPlaylist, bool]:
+    """マスタープレイリストを最大4回たどって最小帯域のメディアプレイリストを開く。
+
+    暗号化の宣言を引き継ぎ、`media.declared_codec` を設定して `(最終 URL, media, encrypted)` を返す。
+    メディアプレイリストが得られない場合は `ProbeError("playlist")`。
     """
     codec = None
     encrypted = False
@@ -421,11 +430,11 @@ def inspect_hls(url: str, headers: dict[str, str], retain: bool, cancelled) -> P
         current = reply.url
         if "#EXT-X-STREAM-INF:" in text and "#EXTINF:" not in text:
             encrypted |= _session_encrypted(text)
-            codec, nxt = _master_target(text, current)
-            current = nxt
+            codec, current = _master_target(text, current)
             continue
         media = parse_media_playlist(text)
-        return _sample(media, current, headers, codec, retain, cancelled, encrypted)
+        media.declared_codec = codec
+        return current, media, encrypted
     raise ProbeError("playlist")
 
 
@@ -1549,26 +1558,8 @@ def _open_endpoints(urls, headers, cancelled):
 
 def _open_media(url: str, headers: dict[str, str], cancelled):
     """マスターを最大4回たどってメディアプレイリストを開き、(最終 URL, media) を返す。"""
-    current = url
-    codec = None
-    for _ in range(4):
-        reply = stream_get(
-            current,
-            headers,
-            limit=TEXT_LIMIT,
-            cancelled=cancelled,
-            redirects=True,
-            readonly_retry=True,
-        )
-        text = reply.body.decode()
-        current = reply.url
-        if "#EXT-X-STREAM-INF:" in text and "#EXTINF:" not in text:
-            codec, current = _master_target(text, current)
-            continue
-        media = parse_media_playlist(text)
-        media.declared_codec = codec
-        return current, media
-    raise ProbeError("playlist")
+    current, media, _encrypted = _resolve_media_playlist(url, headers, cancelled)
+    return current, media
 
 
 def inspect_remote_chapters(station: str, cursor: datetime, cancelled=None) -> ChapterView:
