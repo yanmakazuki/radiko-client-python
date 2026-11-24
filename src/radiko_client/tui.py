@@ -297,12 +297,7 @@ class LineEditor:
             self.cursor = 0
         elif key == "end":
             self.cursor = len(raw)
-        elif (
-            len(key) == 1
-            and key.isprintable()
-            and not key.isspace()
-            or (len(key) == 1 and key not in {"\n", "\t"} and key.isprintable())
-        ):
+        elif len(key) == 1 and key.isprintable():
             changed = self._insert(key, raw)
         # 値が変わると前後のクラスタが融合して境界が消えることがある
         # （書式文字を消したときなど）。変化したときだけ境界を取り直す。
