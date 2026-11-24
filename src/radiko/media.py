@@ -216,21 +216,10 @@ def _parse_adts(data) -> dict:
     """ADTS ヘッダーを1つ読む。同期・layer・rate index を検証し、CRC の有無で
     header_len を 7/9 にした辞書を返す。フレーム長や後続の整合は見ない。
     """
-    if data[0] != 0xFF or data[1] & 0xF0 != 0xF0:
-        raise AacError("header")
-    if (data[1] >> 1) & 0x3 != 0:
-        raise AacError("header")
-    protection_absent = data[1] & 1
-    profile = (data[2] >> 6) & 0x3
-    rate_index = (data[2] >> 2) & 0xF
-    if rate_index >= len(_RATES):
-        raise AacError("header")
-    channels = ((data[2] & 1) << 2) | ((data[3] >> 6) & 0x3)
-    frame_length = ((data[3] & 0x3) << 11) | (data[4] << 3) | ((data[5] >> 5) & 0x7)
-    header_len = 7 if protection_absent else 9
+    object_type, sample_rate, channels, frame_length, header_len = _adts_header(data, 0)
     return {
-        "object_type": profile + 1,
-        "sample_rate": _RATES[rate_index],
+        "object_type": object_type,
+        "sample_rate": sample_rate,
         "channels": channels,
         "frame_length": frame_length,
         "header_len": header_len,
