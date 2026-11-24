@@ -270,6 +270,7 @@ def member_command(command: str, store: SessionStore) -> None:
     try:
         saved = store.load()
     except StorageError as error:
+        # 破損ファイルを勝手に消さず、次の正常な login 保存まで保持する契約のため未ログイン扱いで進む。
         stderr_ln(f"{error}。既存ファイルを保持して未ログインとして扱います")
         saved = None
     if command == "session":
@@ -289,6 +290,7 @@ def member_command(command: str, store: SessionStore) -> None:
     try:
         session, membership = MemberClient.create().login(mail.strip(), password)
     finally:
+        # 例外時も含め、参照を手放す前に平文を書き潰す。
         password = "\0" * len(password)
         del password
     store.save(session)
@@ -490,6 +492,7 @@ def programs(args: list[str], data_dir: Path | None) -> None:
             store.save_last(criteria_from_request(request))
         except SearchError as error:
             stderr_ln(f"検索条件を保存できません: {error}（現在の条件で検索を継続）")
+    # Rust 版の出力契約に合わせ、1局1日の単発取得では並列進捗行や地域集約サマリを出さない。
     if request.station and len(request.range.days) == 1:
         _print_station_day(request, now)
         return
