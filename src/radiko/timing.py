@@ -87,12 +87,7 @@ class ReconnectBudget:
 
     def can_retry(self, error: ProbeError, played: bool) -> bool:
         """再生開始後だけ、network と 408/5xx を再試行対象にする。at は1段はがす。"""
-        if not played:
-            return False
-        current = error.inner if error.code == "at" and error.inner is not None else error
-        if current.code == "network":
-            return True
-        return current.code == "http" and (current.status == 408 or (current.status or 0) >= 500)
+        return played and error.is_transient_http()
 
     def wait(self) -> None:
         """backoff を1秒から倍々で待ち、累計5分またはキャンセルで打ち切る。"""

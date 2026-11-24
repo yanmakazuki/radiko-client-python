@@ -863,10 +863,8 @@ def _refresh_playlist(
 
 def _playlist_retryable(error) -> bool:
     """at を1段はがして、not-found / denied / network / http 408・5xx なら True。"""
-    current = error.inner if error.code == "at" and error.inner is not None else error
-    if current.code in {"not-found", "denied", "network"}:
-        return True
-    return current.code == "http" and (current.status == 408 or (current.status or 0) >= 500)
+    current = error.unwrap_at()
+    return current.code in {"not-found", "denied"} or current.is_transient_http()
 
 
 def _apply_playlist(updated, url, media, sequence, mode, control, headers):
