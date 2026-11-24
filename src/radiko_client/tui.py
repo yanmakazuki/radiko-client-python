@@ -945,57 +945,13 @@ class Screen:
         self.area = "filter"
 
     def _filter_key(self, key: str) -> None:
-        """filter area のキー。Tab/上下で項目移動、F2で候補選択、Enterで確定、Escで取消。
-        候補ピッカー表示中は j/k/Home/End/space/Enter/Esc を扱う。
-        """
+        """filter area のキー。Tab/上下で項目移動、F2で候補選択、Enterで確定、Escで取消。"""
         form = self.filter_form
         if form is None:
             self.area = "list"
             return
         if form.picker is not None:
-            rows = len(form.picker_rows())
-            if key in {"esc", "q"}:
-                form.picker = None
-                form.picker_ids = None
-                return
-            if key in {"j", "down"}:
-                form.picker_index = min(form.picker_index + 1, rows - 1)
-                return
-            if key in {"k", "up"}:
-                form.picker_index = max(form.picker_index - 1, 0)
-                return
-            if key == "home":
-                form.picker_index = 0
-                return
-            if key == "end":
-                form.picker_index = rows - 1
-                return
-            if key == " " and form.picker_ids is not None:
-                if form.picker_index == 0:
-                    form.picker_selected.clear()
-                    form.picker_unclassified = False
-                    form.error = ""
-                elif form.picker_index == 1:
-                    form.picker_unclassified = not form.picker_unclassified
-                    form.error = ""
-                else:
-                    self._toggle_class(form, form.picker_index - 2)
-                return
-            if key == "enter":
-                if form.picker_ids is None:
-                    if form.picker_field == 2:
-                        form.set_field(2, form.picker[form.picker_index])
-                    form.picker = None
-                    return
-                ids = sorted(form.picker_selected)
-                axis = 0 if form.picker_field == 3 else 1
-                form.set_field(3 + axis, ",".join(ids))
-                if axis == 0:
-                    form.unclassified_program = form.picker_unclassified
-                else:
-                    form.unclassified_personality = form.picker_unclassified
-                form.picker = None
-                form.picker_ids = None
+            self._picker_key(form, key)
             return
         if key == "esc":
             self.area = "list"
@@ -1034,6 +990,54 @@ class Screen:
             return
         if form.focus <= 5:
             form.field(form.focus).handle(key)
+
+    def _picker_key(self, form: FilterForm, key: str) -> None:
+        """候補ピッカー表示中のキー。j/k/Home/Endで移動、Spaceで選択切替、Enterで確定、Esc/qで取消。"""
+        if form.picker is None:
+            return
+        rows = len(form.picker_rows())
+        if key in {"esc", "q"}:
+            form.picker = None
+            form.picker_ids = None
+            return
+        if key in {"j", "down"}:
+            form.picker_index = min(form.picker_index + 1, rows - 1)
+            return
+        if key in {"k", "up"}:
+            form.picker_index = max(form.picker_index - 1, 0)
+            return
+        if key == "home":
+            form.picker_index = 0
+            return
+        if key == "end":
+            form.picker_index = rows - 1
+            return
+        if key == " " and form.picker_ids is not None:
+            if form.picker_index == 0:
+                form.picker_selected.clear()
+                form.picker_unclassified = False
+                form.error = ""
+            elif form.picker_index == 1:
+                form.picker_unclassified = not form.picker_unclassified
+                form.error = ""
+            else:
+                self._toggle_class(form, form.picker_index - 2)
+            return
+        if key == "enter":
+            if form.picker_ids is None:
+                if form.picker_field == 2:
+                    form.set_field(2, form.picker[form.picker_index])
+                form.picker = None
+                return
+            ids = sorted(form.picker_selected)
+            axis = 0 if form.picker_field == 3 else 1
+            form.set_field(3 + axis, ",".join(ids))
+            if axis == 0:
+                form.unclassified_program = form.picker_unclassified
+            else:
+                form.unclassified_personality = form.picker_unclassified
+            form.picker = None
+            form.picker_ids = None
 
     def _open_class_picker(self, form: FilterForm, focus: int) -> None:
         """分類の選択候補を観測結果から作り、現在の指定を選択済みにして開く。"""
