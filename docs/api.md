@@ -21,21 +21,23 @@
 - [`ChapterSet`](../src/radiko/domain.py#L190): チャプターの集合。
 - [`Filter`](../src/radiko/domain.py#L218): 検索条件。
 - [`Scope`](../src/radiko/domain.py#L427): 検索範囲。
+- [`is_valid_station_id`](../src/radiko/domain.py#L455): 有効な局IDか。
 - [`SearchCriteria`](../src/radiko/domain.py#L470): 検索条件の一式。
 - [`criteria_from_file`](../src/radiko/domain.py#L530): 保存用の辞書から SearchCriteria を復元する。
+- [`parse_ymd`](../src/radiko/domain.py#L563): YYYYMMDD の8桁 ASCII 数字を date にする。
 
 ### [radiko.catalog](../src/radiko/catalog.py)
 
 キャッシュしない局一覧と日別番組表。
 
-- [`CatalogError`](../src/radiko/catalog.py#L36): 番組表・局一覧の取得と解析の失敗。
-- [`ProgramList`](../src/radiko/catalog.py#L143): 1局・1放送日の番組表。
-- [`parse_programs`](../src/radiko/catalog.py#L154): 番組表 XML を検証し、`<prog>` を Program にして放送日順で返す。
-- [`parse_stations`](../src/radiko/catalog.py#L248): 局一覧 XML を検証し、Station の並びを返す。
-- [`parse_endpoints`](../src/radiko/catalog.py#L284): 配信先 XML から、モードと地域に合う `playlist_create_url` を返す。
-- [`CatalogClient`](../src/radiko/catalog.py#L479): fetch 関数で XML を取得し、局一覧と番組表を解析するクライアント。
-- [`acquire_range`](../src/radiko/catalog.py#L545): 地域の並びから局一覧を並列取得し、続けて全員分の番組表を取得する。
-- [`acquire_stations`](../src/radiko/catalog.py#L596): 局IDの並びから全員分の番組表を並列取得する。
+- [`CatalogError`](../src/radiko/catalog.py#L38): 番組表・局一覧の取得と解析の失敗。
+- [`ProgramList`](../src/radiko/catalog.py#L136): 1局・1放送日の番組表。
+- [`parse_programs`](../src/radiko/catalog.py#L147): 番組表 XML を検証し、`<prog>` を Program にして放送日順で返す。
+- [`parse_stations`](../src/radiko/catalog.py#L241): 局一覧 XML を検証し、Station の並びを返す。
+- [`parse_endpoints`](../src/radiko/catalog.py#L277): 配信先 XML から、モードと地域に合う `playlist_create_url` を返す。
+- [`CatalogClient`](../src/radiko/catalog.py#L472): fetch 関数で XML を取得し、局一覧と番組表を解析するクライアント。
+- [`acquire_range`](../src/radiko/catalog.py#L538): 地域の並びから局一覧を並列取得し、続けて全員分の番組表を取得する。
+- [`acquire_stations`](../src/radiko/catalog.py#L589): 局IDの並びから全員分の番組表を並列取得する。
 
 ### [radiko.auth](../src/radiko/auth.py)
 
@@ -50,25 +52,25 @@
 
 配信の準備。
 
-- [`ResolvedProgram`](../src/radiko/prepare.py#L49): API から解決した1番組。
-- [`ProbeReport`](../src/radiko/prepare.py#L70): probe の結果。
-- [`PlayReport`](../src/radiko/prepare.py#L110): 再生ループの結果。
-- [`ChapterView`](../src/radiko/prepare.py#L143): チャプター取得の表示用ビュー。
-- [`prepare`](../src/radiko/prepare.py#L304): 再生に必要な番組・認証・エリア・配信先 URL を解決する。
-- [`inspect_hls`](../src/radiko/prepare.py#L402): マスター/メディアプレイリストをたどり、先頭セグメントを probe する。
-- [`probe`](../src/radiko/prepare.py#L700): 番組を解決して配信先ごとに HLS を試し、最初に成功した ProbeReport を返す。
-- [`play_station`](../src/radiko/prepare.py#L955): 再生を実行して PlayReport を返す公開ラッパー。
-- [`inspect_remote_chapters`](../src/radiko/prepare.py#L1561): 番組のチャプターを取得して ChapterView を返す。
+- [`ResolvedProgram`](../src/radiko/prepare.py#L50): API から解決した1番組。
+- [`ProbeReport`](../src/radiko/prepare.py#L71): probe の結果。
+- [`PlayReport`](../src/radiko/prepare.py#L111): 再生ループの結果。
+- [`ChapterView`](../src/radiko/prepare.py#L144): チャプター取得の表示用ビュー。
+- [`prepare`](../src/radiko/prepare.py#L300): 再生に必要な番組・認証・エリア・配信先 URL を解決する。
+- [`inspect_hls`](../src/radiko/prepare.py#L398): マスター/メディアプレイリストをたどり、先頭セグメントを probe する。
+- [`probe`](../src/radiko/prepare.py#L704): 番組を解決して配信先ごとに HLS を試し、最初に成功した ProbeReport を返す。
+- [`play_station`](../src/radiko/prepare.py#L952): 再生を実行して PlayReport を返す公開ラッパー。
+- [`inspect_remote_chapters`](../src/radiko/prepare.py#L1555): 番組のチャプターを取得して ChapterView を返す。
 
 ### [radiko.http_client](../src/radiko/http_client.py)
 
 制限付き HTTP。
 
 - [`Reply`](../src/radiko/http_client.py#L23): HTTP 応答。
-- [`get`](../src/radiko/http_client.py#L130): GET。
-- [`post_form`](../src/radiko/http_client.py#L385): ログイン POST。
-- [`catalog_fetch`](../src/radiko/http_client.py#L408): 番組表を取得して gzip を解凍する。
-- [`stream_get`](../src/radiko/http_client.py#L464): 本番 URL を載せ替えて取得する。
+- [`get`](../src/radiko/http_client.py#L114): GET。
+- [`post_form`](../src/radiko/http_client.py#L367): ログイン POST。
+- [`catalog_fetch`](../src/radiko/http_client.py#L390): 番組表を取得して gzip を解凍する。
+- [`stream_get`](../src/radiko/http_client.py#L446): 本番 URL を載せ替えて取得する。
 
 ### [radiko.reauth](../src/radiko/reauth.py)
 
@@ -94,15 +96,15 @@ MP4 の箱の上限、ADTS の境界、AAC の復号。
 - [`AacError`](../src/radiko/media.py#L27): AAC の解析・復号の失敗。
 - [`DecodedPcm`](../src/radiko/media.py#L84): 復号済み PCM と要約。
 - [`split_adts`](../src/radiko/media.py#L133): ADTS をフレームへ分割する。
-- [`AdtsDecoder`](../src/radiko/media.py#L240): セグメントをまたいで形式を覚え、失敗したら状態を捨てる。
-- [`validate_mp4`](../src/radiko/media.py#L340): MP4 の箱構造と上限を検証する。
+- [`AdtsDecoder`](../src/radiko/media.py#L229): セグメントをまたいで形式を覚え、失敗したら状態を捨てる。
+- [`validate_mp4`](../src/radiko/media.py#L329): MP4 の箱構造と上限を検証する。
 
 ### [radiko.fragmented](../src/radiko/fragmented.py)
 
 単一 AAC トラックの fragmented MP4。
 
-- [`FragmentPcm`](../src/radiko/fragmented.py#L20): fMP4 1フラグメントの復号結果。
-- [`FragmentedAacDecoder`](../src/radiko/fragmented.py#L264): 単一 AAC トラックの fragmented MP4 デコーダ。
+- [`FragmentPcm`](../src/radiko/fragmented.py#L23): fMP4 1フラグメントの復号結果。
+- [`FragmentedAacDecoder`](../src/radiko/fragmented.py#L247): 単一 AAC トラックの fragmented MP4 デコーダ。
 
 ### [radiko.output](../src/radiko/output.py)
 
@@ -131,23 +133,24 @@ session.json と searches.json。
 
 - [`MemberSession`](../src/radiko/storage.py#L22): 再利用できるセッショントークンだけを持つ。
 - [`Membership`](../src/radiko/storage.py#L56): 会員の聴取可否。
-- [`StorageError`](../src/radiko/storage.py#L75): session.json の読み書き失敗。
-- [`SearchError`](../src/radiko/storage.py#L105): searches.json の読み書き失敗。
-- [`default_data_dir`](../src/radiko/storage.py#L159): directories 6 の data_local_dir と同じ場所。
-- [`SessionStore`](../src/radiko/storage.py#L194): session.json の読み書き。
-- [`Library`](../src/radiko/storage.py#L304): searches.json の中身。
-- [`SearchStore`](../src/radiko/storage.py#L315): searches.json の読み書き。
+- [`StorageError`](../src/radiko/storage.py#L91): session.json の読み書き失敗。
+- [`SearchError`](../src/radiko/storage.py#L121): searches.json の読み書き失敗。
+- [`default_data_dir`](../src/radiko/storage.py#L175): directories 6 の data_local_dir と同じ場所。
+- [`DataDir`](../src/radiko/storage.py#L186): データ保存先のディレクトリ。
+- [`SessionStore`](../src/radiko/storage.py#L210): session.json の読み書き。
+- [`Library`](../src/radiko/storage.py#L334): searches.json の中身。
+- [`SearchStore`](../src/radiko/storage.py#L345): searches.json の読み書き。
 
 ### [radiko.stream](../src/radiko/stream.py)
 
 配信の時刻、局 ID、タイムフリー期限。
 
 - [`ProbeError`](../src/radiko/stream.py#L12): 配信の検証・取得の失敗。
-- [`SlotProgram`](../src/radiko/stream.py#L129): 番組表の1枠。
-- [`eligible`](../src/radiko/stream.py#L139): 再生時点の可否を判定する。
-- [`area_contract`](../src/radiko/stream.py#L166): エリア外の契約判定。
-- [`availability`](../src/radiko/stream.py#L179): 番組情報のタイムフリー可否を見る。
-- [`deadline_pair`](../src/radiko/stream.py#L201): 無料期限（放送日の翌日05:00+7日）と有料期限（+30日）を RFC3339 で返す。
+- [`SlotProgram`](../src/radiko/stream.py#L133): 番組表の1枠。
+- [`eligible`](../src/radiko/stream.py#L143): 再生時点の可否を判定する。
+- [`area_contract`](../src/radiko/stream.py#L170): エリア外の契約判定。
+- [`availability`](../src/radiko/stream.py#L183): 番組情報のタイムフリー可否を見る。
+- [`deadline_pair`](../src/radiko/stream.py#L205): 無料期限（放送日の翌日05:00+7日）と有料期限（+30日）を RFC3339 で返す。
 
 ### [radiko.chapters](../src/radiko/chapters.py)
 
@@ -170,14 +173,15 @@ session.json と searches.json。
 - [`graphemes`](../src/radiko/text.py#L35): 拡張書記素クラスタ。
 - [`display_width`](../src/radiko/text.py#L42): 表示幅0の文字（結合文字・書式文字・C0とDEL）は0、全角と全幅は2、それ以外のクラスタは1。
 - [`clean_text`](../src/radiko/text.py#L84): 空白は一つに畳み、Cc の制御文字は捨てる。
+- [`strip_control`](../src/radiko/text.py#L89): 空白を畳まず、改行・タブを含むすべての Cc 制御文字だけを除去する。
 
 ### [radiko.timing](../src/radiko/timing.py)
 
 断片の時刻照合と、再生開始後の再接続待ち。
 
-- [`accept_fragment`](../src/radiko/timing.py#L18): PCM 長と EXTINF、tfdt の差と PROGRAM-DATE-TIME の差は 2ms 以内。
-- [`trim_pcm`](../src/radiko/timing.py#L47): 番組時刻から目標までを切り捨てる。
-- [`ReconnectBudget`](../src/radiko/timing.py#L77): 再生が一度始まったあとの通信失敗だけを、1 秒から倍々で最大 5 分待つ。
+- [`accept_fragment`](../src/radiko/timing.py#L19): PCM 長と EXTINF、tfdt の差と PROGRAM-DATE-TIME の差は 2ms 以内。
+- [`trim_pcm`](../src/radiko/timing.py#L43): 番組時刻から目標までを切り捨てる。
+- [`ReconnectBudget`](../src/radiko/timing.py#L73): 再生が一度始まったあとの通信失敗だけを、1 秒から倍々で最大 5 分待つ。
 
 ### [radiko.urls](../src/radiko/urls.py)
 
@@ -208,8 +212,8 @@ macOS の CoreAudio。
 
 引数、終了コード、各サブコマンド。
 
-- [`main`](../src/radiko_client/cli.py#L101): CLI の入口。
-- [`run`](../src/radiko_client/cli.py#L129): `--data-dir` を分離し、サブコマンドへ振り分ける。
+- [`main`](../src/radiko_client/cli.py#L100): CLI の入口。
+- [`run`](../src/radiko_client/cli.py#L128): `--data-dir` を分離し、サブコマンドへ振り分ける。
 
 ### [radiko_client.programs](../src/radiko_client/programs.py)
 
@@ -223,12 +227,12 @@ programs の引数解析と検索条件。
 
 検索と再生の TUI。
 
-- [`Screen`](../src/radiko_client/tui.py#L488): TUI の全状態。
-- [`FilterForm`](../src/radiko_client/tui.py#L104): 全条件。
-- [`LineEditor`](../src/radiko_client/tui.py#L257): 1行入力の編集状態。
-- [`NoticeLevel`](../src/radiko_client/tui.py#L233): 通知の重要度。
-- [`Notice`](../src/radiko_client/tui.py#L247): フッターに出す通知1件。
-- [`run`](../src/radiko_client/tui.py#L2045): TUI の入口。
+- [`Screen`](../src/radiko_client/tui.py#L462): TUI の全状態。
+- [`FilterForm`](../src/radiko_client/tui.py#L103): 全条件。
+- [`LineEditor`](../src/radiko_client/tui.py#L256): 1行入力の編集状態。
+- [`NoticeLevel`](../src/radiko_client/tui.py#L232): 通知の重要度。
+- [`Notice`](../src/radiko_client/tui.py#L246): フッターに出す通知1件。
+- [`run`](../src/radiko_client/tui.py#L2009): TUI の入口。
 
 ### [radiko_client.io](../src/radiko_client/io.py)
 
