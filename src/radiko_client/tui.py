@@ -898,7 +898,6 @@ class Screen:
         return "\n".join(lines)
 
     def _open_filter(self, criteria: SearchCriteria | None = None) -> None:
-        # 呼び出し元の条件を下書きに入れるだけ。確定は編集画面の Enter。
         """現在（または指定）の条件を下書きにして filter area を開く。確定は編集画面の Enter。"""
         if criteria is None:
             criteria = self.ensure_criteria()
@@ -2114,6 +2113,8 @@ def _read_key(timeout: float | None = None) -> str | None:
     raw = _read_raw(timeout)
     if not raw:
         return None
+    # 単体の Esc キー押下を待たせずに返しつつ、連続して届くマルチバイト文字や
+    # 矢印・F2 シーケンスを取りこぼさないよう後続バイトは 20ms の短いタイムアウトで読む。
     if raw[0] >= 0x80:
         extra = 1 if raw[0] < 0xE0 else 2 if raw[0] < 0xF0 else 3
         parts = bytearray(raw)

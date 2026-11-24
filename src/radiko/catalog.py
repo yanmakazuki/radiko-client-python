@@ -355,6 +355,8 @@ def _genre_classes(genre: ET.Element | None) -> tuple[list[Classification], list
 
 def _parse_document(text: str, root_name: str) -> ET.Element:
     """1回のパースで要素ツリー・ルート名・最大深さを検証する。"""
+    # 巨大 XML や深い入れ子・エンティティ展開によるメモリ/スタック消費を
+    # 全文展開前に遮断するため、宣言を拒否して 64KiB ずつ深さを検査する。
     if _FORBIDDEN_DECLARATION.search(text):
         raise CatalogError("xml")
     parser: ET.XMLPullParser = ET.XMLPullParser(events=("start", "end"))
@@ -512,6 +514,8 @@ def _gunzip_bounded(data: bytes) -> bytes:
         raise CatalogError("xml")
     output = bytearray()
     remaining = data
+    # 連結された複数の gzip メンバーにも対応しつつ、
+    # gzip ボムを全展開前に 4MiB 上限で即座に打ち切る。
     while remaining:
         decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
         pending = remaining
