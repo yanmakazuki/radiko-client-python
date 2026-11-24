@@ -42,7 +42,7 @@ from radiko.domain import (
 from radiko.http_client import catalog_fetch
 from radiko.output import OutputCapability, OutputError, diagnose_default_output
 from radiko.prepare import inspect_remote_chapters, play_station
-from radiko.storage import SearchStore, SessionStore, default_data_dir
+from radiko.storage import SearchStore, SessionStore
 from radiko.stream import validate_station
 from radiko.text import cluster_width, display_width, graphemes
 from radiko_client.io import stderr_ln, stdout_ln
@@ -1374,7 +1374,7 @@ class Screen:
 
     def _named_store(self) -> SearchStore:
         """名前付き条件の SearchStore。data_dir が無ければ既定の保存先。"""
-        return SearchStore(self.data_dir or default_data_dir())
+        return SearchStore.for_dir(self.data_dir)
 
     def _open_named(self) -> None:
         """保存済み条件を読み込んで named area を開く。オフライン・読み込み失敗は通知。"""
@@ -1713,7 +1713,7 @@ def perform_pending(screen: Screen) -> None:
     if screen.logout_request:
         screen.logout_request = False
 
-        store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
+        store = SessionStore.for_dir(screen.data_dir)
         store.delete()
         screen.auth_generation += 1
         screen.auth = "signed-out"
@@ -1724,7 +1724,7 @@ def perform_pending(screen: Screen) -> None:
         screen.password = ""
         try:
             session, _membership = MemberClient.create().login(mail, password)
-            store = SessionStore(screen.data_dir) if screen.data_dir else SessionStore.default()
+            store = SessionStore.for_dir(screen.data_dir)
             store.save(session)
             screen.auth_generation += 1
             screen.auth = "signed-in"
@@ -1750,7 +1750,7 @@ def perform_pending(screen: Screen) -> None:
 
 def _check_auth(data_dir: Path | None) -> tuple[str, str, bool]:
     """保存セッションの確認。画面は触らず、(表示, 通知文, エラーか) だけを返す。"""
-    store = SessionStore(data_dir) if data_dir else SessionStore.default()
+    store = SessionStore.for_dir(data_dir)
     try:
         session = store.load()
     except Exception as error:
@@ -1761,21 +1761,7 @@ def _check_auth(data_dir: Path | None) -> tuple[str, str, bool]:
         membership = MemberClient.create().check(session)
     except AuthError as error:
         return "signed-out", str(error), True
-
-    def label(value: bool | None) -> str:
-        """真偽値と未確認を「あり」「なし」「未確認」に分ける。"""
-        if value is True:
-            return "あり"
-        if value is False:
-            return "なし"
-        return "未確認"
-
-    return (
-        "signed-in",
-        f"ログイン有効 / エリアフリー: {label(membership.area_free)} / "
-        f"タイムフリー30: {label(membership.time_free_30)}",
-        False,
-    )
+    return ("signed-in", membership.status_line(), False)
 
 
 def _start_auth(screen: Screen, show_notice: bool) -> None:
@@ -1917,7 +1903,7 @@ def _start_job(screen: Screen, kind: str, payload) -> None:
             else:
                 program, offset, mode, now, data_dir = payload
 
-                store = SessionStore(data_dir) if data_dir else SessionStore.default()
+                store = SessionStore.for_dir(data_dir)
                 session = store.load()
                 if session is None:
                     raise RuntimeError("未ログインです。loginでログインしてください")
@@ -2024,7 +2010,7 @@ def startup_state(args: list[str], data_dir: Path | None, now: datetime, offline
     notice = ""
     if not offline:
         try:
-            store = SearchStore(data_dir) if data_dir else SearchStore(default_data_dir())
+            store = SearchStore.for_dir(data_dir)
         except Exception as error:
             notice = f"条件保存先の取得失敗: {error}"
     if args:

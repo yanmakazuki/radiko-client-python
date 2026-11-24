@@ -71,6 +71,22 @@ class Membership:
             and self.time_free_30 == other.time_free_30
         )
 
+    def status_line(self) -> str:
+        """契約を「ログイン有効 / エリアフリー: あり|なし|未確認 / タイムフリー30: …」にする。"""
+
+        def label(value: bool | None) -> str:
+            """True / False / None を あり / なし / 未確認 にする。"""
+            if value is True:
+                return "あり"
+            if value is False:
+                return "なし"
+            return "未確認"
+
+        return (
+            f"ログイン有効 / エリアフリー: {label(self.area_free)} / "
+            f"タイムフリー30: {label(self.time_free_30)}"
+        )
+
 
 class StorageError(Exception):
     """session.json の読み書き失敗。`code` と `detail` から表示文を作る。
@@ -205,6 +221,11 @@ class SessionStore:
         """既定のデータ保存先を使うストアを返す。"""
         return DataDir.default().sessions()
 
+    @classmethod
+    def for_dir(cls, data_dir: Path | None = None) -> SessionStore:
+        """data_dir があれば cls(data_dir)、無ければ cls.default() を返す。"""
+        return cls(data_dir) if data_dir is not None else cls.default()
+
     @property
     def path(self) -> Path:
         """session.json のパス。"""
@@ -318,6 +339,11 @@ class SearchStore:
     def __init__(self, directory: Path) -> None:
         """保存先ディレクトリを受け取る。session と同じディレクトリを使う。"""
         self.base = SessionStore(directory)
+
+    @classmethod
+    def for_dir(cls, data_dir: Path | None = None) -> SearchStore:
+        """data_dir があれば cls(data_dir)、無ければ DataDir.default().searches() を返す。"""
+        return cls(data_dir) if data_dir is not None else DataDir.default().searches()
 
     @property
     def path(self) -> Path:
