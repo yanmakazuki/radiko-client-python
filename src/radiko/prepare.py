@@ -1025,15 +1025,8 @@ def _play_station(
 ) -> PlayReport:
     """HLS を取得・復号・出力し、終了理由を PlayReport にまとめる。
 
-    `commands` は操作コマンドのリストか、1件ずつ返す callable。`on_notice` は
-    操作メッセージ、`on_ready` は番組解決後の1回だけの通知。`reconnect_sleep` は
-    再接続の待機、`reauth_now` は再認証の時計を差し替える。
-
-    `cancelled()` か停止コマンドで `reason="cancelled"`、`limit` 到達で
-    `"limit"`、ENDLIST の終端で `"program-end"` を返す。局切替・シーク要求は
-    内側ループを抜けて prepare からやり直す。通信失敗は再生開始後なら
-    ReconnectBudget の範囲で再接続し、認証切れは再認証して再取得する。
-    回復できない失敗は `ProbeError` を送出する（stage が付くことがある）。
+    `cancelled()` か停止で `"cancelled"`、`limit` 到達で `"limit"`、ENDLIST 終端で
+    `"program-end"` を返し、回復不能な失敗は `ProbeError` を送出する。
     """
     # 切替・シークをまたいで操作メッセージと音量を持ち越す。
     carried: list[str] = []
@@ -1067,27 +1060,17 @@ def _play_station(
         control.messages.extend(carried)
         carried = []
         if carried_volume is not None:
-            control.volume = carried_volume
-            carried_volume = None
+            control.volume, carried_volume = carried_volume, None
         control.position = position
         budget = ReconnectBudget(cancelled, sleep=reconnect_sleep)
-        stamp = None
-        codec = getattr(media, "declared_codec", None)
-        rate = 48000
-        channels = 2
-        taken = 0
-        played_frames = 0
-        underrun_frames = 0
-        media_seconds = 0.0
+        stamp, codec = None, getattr(media, "declared_codec", None)
+        rate, channels = 48000, 2
+        taken, played_frames, underrun_frames, media_seconds = 0, 0, 0, 0.0
         reason = "program-end"
-        decoder = AdtsDecoder()
-        fragment_decoder = None
-        init_uri = None
-        discontinuity = None
+        decoder, fragment_decoder, init_uri, discontinuity = AdtsDecoder(), None, None, None
         sequence = media.media_sequence
-        pending = None
+        pending = (program.start + timedelta(seconds=position), position) if position else None
         if position:
-            pending = (program.start + timedelta(seconds=position), position)
             media_seconds = position
         stream = None
         stop_playback = _StopView(
@@ -1131,13 +1114,9 @@ def _play_station(
         def reset_state() -> None:
             """不連続や窓の飛び越しで、デコーダと時刻照合を捨てる。"""
             nonlocal decoder, fragment_decoder, init_uri, stamp
-            decoder = AdtsDecoder()
-            fragment_decoder = None
-            init_uri = None
-            stamp = None
+            decoder, fragment_decoder, init_uri, stamp = AdtsDecoder(), None, None, None
 
-        switching = False
-        reseeking = False
+        switching, reseeking = False, False
         try:
             while True:
                 if cancelled() or control.stopped:
@@ -1151,15 +1130,9 @@ def _play_station(
                     close_stream()
                     if queue is not None:
                         queue.clear()
-                    station, mode, cursor, now, position = (
-                        new_station,
-                        new_mode,
-                        new_cursor,
-                        datetime.now(timezone.utc),
-                        new_offset,
-                    )
-                    on_ready = None
-                    switching = True
+                    now = datetime.now(timezone.utc)
+                    station, mode, cursor, position = new_station, new_mode, new_cursor, new_offset
+                    on_ready, switching = None, True
                     break
                 if control.stopped or cancelled():
                     reason = "cancelled"
@@ -1232,100 +1205,37 @@ def _play_station(
                 segment = _segment_at(media, sequence)
                 if segment is None:
                     raise ProbeError("window")
-                try:
-                    if segment.map_uri:
-                        resolved = _join(playlist_url, segment.map_uri)
-                        if resolved != init_uri:
-                            init_bytes, headers, media, playlist_url, sequence, reset = (
-                                _get_or_recover(
-                                    resolved,
-                                    {},
-                                    "HLS初期化情報取得",
-                                    reauth,
-                                    headers,
-                                    playlist_url,
-                                    source,
-                                    media,
-                                    sequence,
-                                    mode,
-                                    cancelled,
-                                    taken > 0,
-                                    "init",
-                                )
-                            )
-                            if reset:
-                                reset_state()
-                                continue
-                            if not init_bytes:
-                                raise ProbeError("playlist")
-                            fragment_decoder = FragmentedAacDecoder(init_bytes)
-                            segment = _segment_at(media, sequence)
-                            if segment is None:
-                                raise ProbeError("window")
-                            init_uri = (
-                                _join(playlist_url, segment.map_uri) if segment.map_uri else None
-                            )
-                    payload, headers, media, playlist_url, sequence, reset = _get_or_recover(
-                        _join(playlist_url, segment.uri),
-                        {},
-                        "HLS音声取得",
-                        reauth,
-                        headers,
-                        playlist_url,
-                        source,
-                        media,
-                        sequence,
-                        mode,
-                        cancelled,
-                        taken > 0,
-                    )
-                    if reset:
-                        reset_state()
-                        continue
-                    if not payload:
-                        raise ProbeError("playlist")
-                except ProbeError as error:
-                    if _cancelled_error(error):
-                        reason = "cancelled"
-                        break
-                    if budget.can_retry(error, taken > 0):
-                        try:
-                            budget.wait()
-                            latest, latest_url, latest_headers = _refresh_playlist(
-                                playlist_url,
-                                source,
-                                headers,
-                                cancelled,
-                                reauth,
-                                mode,
-                                True,
-                                "HLS一覧更新",
-                            )
-                            media, playlist_url, sequence, headers, reset = _apply_playlist(
-                                latest,
-                                latest_url,
-                                media,
-                                sequence,
-                                mode,
-                                control,
-                                latest_headers,
-                            )
-                            if reset:
-                                reset_state()
-                        except ProbeError as waited:
-                            if _cancelled_error(waited):
-                                reason = "cancelled"
-                                break
-                            if budget.can_retry(waited, True):
-                                continue
-                            raise
-                        continue
-                    raise
+                fetched = _fetch_segment(
+                    segment,
+                    media,
+                    sequence,
+                    playlist_url,
+                    source,
+                    headers,
+                    mode,
+                    control,
+                    reauth,
+                    budget,
+                    cancelled,
+                    taken > 0,
+                    fragment_decoder,
+                    init_uri,
+                )
+                headers, media, playlist_url = fetched.headers, fetched.media, fetched.playlist_url
+                sequence, segment = fetched.sequence, fetched.segment
+                fragment_decoder, init_uri = fetched.fragment_decoder, fetched.init_uri
+                if fetched.reset:
+                    reset_state()
+                if fetched.cancelled:
+                    reason = "cancelled"
+                    break
+                if fetched.retry:
+                    continue
                 reauth.episode = False
                 codec = getattr(media, "declared_codec", None) or codec
                 # limit の切り詰めは _decode_segment が行い、stop/limit_hit でここが打ち切る。
                 decoded_segment = _decode_segment(
-                    payload,
+                    fetched.payload,
                     segment,
                     media,
                     sequence,
@@ -1339,8 +1249,7 @@ def _play_station(
                     cancelled,
                 )
                 stamp = decoded_segment.stamp
-                rate = decoded_segment.rate
-                channels = decoded_segment.channels
+                rate, channels = decoded_segment.rate, decoded_segment.channels
                 if decoded_segment.discard:
                     sequence += 1
                     continue
@@ -1357,10 +1266,7 @@ def _play_station(
                 taken += 1
                 sequence += 1
                 budget.reset()
-                if decoded_segment.limit_hit:
-                    reason = "limit"
-                    break
-                if limit is not None and media_seconds >= limit:
+                if decoded_segment.limit_hit or (limit is not None and media_seconds >= limit):
                     reason = "limit"
                     break
         finally:
@@ -1369,14 +1275,10 @@ def _play_station(
         all_frames += played_frames
         all_underrun += underrun_frames
         if reseeking:
-            carried = control.messages
-            on_ready = None
+            carried, on_ready = control.messages, None
             continue
         if switching:
-            all_taken = 0
-            all_frames = 0
-            all_underrun = 0
-            carried_volume = None
+            all_taken, all_frames, all_underrun, carried_volume = 0, 0, 0, None
             continue
         if cancelled():
             reason = "cancelled"
@@ -1394,6 +1296,119 @@ def _play_station(
             program.end,
             control.messages,
         )
+
+
+@dataclass
+class _FetchedSegment:
+    """1セグメントの取得結果。`cancelled` は再生終了、`reset` はデコーダと時刻照合の
+    リセット、`retry` は現周回をスキップして次周回へ進むことを示す。
+    """
+
+    payload: bytes
+    headers: dict[str, str]
+    media: object
+    playlist_url: str
+    sequence: int
+    fragment_decoder: FragmentedAacDecoder | None
+    init_uri: str | None
+    segment: object
+    reset: bool = False
+    retry: bool = False
+    cancelled: bool = False
+
+
+def _fetch_segment(
+    segment,
+    media,
+    sequence: int,
+    playlist_url: str,
+    source: str,
+    headers: dict[str, str],
+    mode: str,
+    control: InteractiveControl,
+    reauth: ReauthState,
+    budget: ReconnectBudget,
+    cancelled,
+    played: bool,
+    fragment_decoder: FragmentedAacDecoder | None,
+    init_uri: str | None,
+) -> _FetchedSegment:
+    """初期化セグメントとメディアセグメントを取得し、失敗時は再接続を試みる。"""
+
+    def state(payload: bytes = b"", **flags: bool) -> _FetchedSegment:
+        """現在の局所状態をまとめた _FetchedSegment を返す。"""
+        return _FetchedSegment(
+            payload,
+            headers,
+            media,
+            playlist_url,
+            sequence,
+            fragment_decoder,
+            init_uri,
+            segment,
+            **flags,
+        )
+
+    def fetch(target: str, stage: str, kind: str = "media") -> tuple[bytes, bool]:
+        """_get_or_recover を呼び、更新後のヘッダ・プレイリスト・位置を局所変数へ反映する。"""
+        nonlocal headers, media, playlist_url, sequence
+        body, headers, media, playlist_url, sequence, reset = _get_or_recover(
+            target,
+            {},
+            stage,
+            reauth,
+            headers,
+            playlist_url,
+            source,
+            media,
+            sequence,
+            mode,
+            cancelled,
+            played,
+            kind,
+        )
+        return body, reset
+
+    try:
+        if segment.map_uri:
+            resolved = _join(playlist_url, segment.map_uri)
+            if resolved != init_uri:
+                init_bytes, reset = fetch(resolved, "HLS初期化情報取得", "init")
+                if reset:
+                    return state(reset=True, retry=True)
+                if not init_bytes:
+                    raise ProbeError("playlist")
+                fragment_decoder = FragmentedAacDecoder(init_bytes)
+                segment = _segment_at(media, sequence)
+                if segment is None:
+                    raise ProbeError("window")
+                init_uri = _join(playlist_url, segment.map_uri) if segment.map_uri else None
+        payload, reset = fetch(_join(playlist_url, segment.uri), "HLS音声取得")
+        if reset:
+            return state(reset=True, retry=True)
+        if not payload:
+            raise ProbeError("playlist")
+        return state(payload)
+    except ProbeError as error:
+        if _cancelled_error(error):
+            return state(cancelled=True)
+        if not budget.can_retry(error, played):
+            raise
+        try:
+            budget.wait()
+            latest, latest_url, latest_headers = _refresh_playlist(
+                playlist_url, source, headers, cancelled, reauth, mode, True, "HLS一覧更新"
+            )
+            media, playlist_url, sequence, headers, reset = _apply_playlist(
+                latest, latest_url, media, sequence, mode, control, latest_headers
+            )
+        except ProbeError as waited:
+            if _cancelled_error(waited):
+                return state(cancelled=True)
+            if budget.can_retry(waited, True):
+                return state(retry=True)
+            raise
+        return state(reset=reset, retry=True)
 
 
 @dataclass
